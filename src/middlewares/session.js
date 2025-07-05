@@ -1,8 +1,11 @@
 import { session } from 'telegraf';
 
-export default (ctx, next) => {
-  if (ctx.update && ctx.update.update_id) {
-    return session()(ctx, next);
-  }
-  return next();
-};
+export default function safeSession() {
+  const sessionMiddleware = session();
+  return async (ctx, next) => {
+    if (ctx.update && ctx.update.update_id) {
+      return sessionMiddleware(ctx, next);
+    }
+    return next();
+  };
+}
