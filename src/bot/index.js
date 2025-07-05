@@ -118,4 +118,13 @@ bot.action('ADMIN_CITY', async (ctx) => {
   }
 });
 
-bot.launch();
+if (process.env.RENDER === 'true') {
+  bot.launch({
+    webhook: {
+      domain: process.env.RENDER_EXTERNAL_URL,
+      port: process.env.PORT || 3000,
+    }
+  });
+} else {
+  bot.launch(); // for local dev
+}
