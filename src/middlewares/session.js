@@ -1,3 +1,8 @@
 import { session } from 'telegraf';
 
-export default session(); // Can be extended later
+export default (ctx, next) => {
+  if (ctx.update && ctx.update.update_id) {
+    return session()(ctx, next);
+  }
+  return next();
+};
