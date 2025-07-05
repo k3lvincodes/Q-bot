@@ -1,0 +1,28 @@
+{
+  "name": "q-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for subscription sharing (Q by Cratebux)",
+  "main": "src/bot/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon src/bot/index.js",
+    "start": "node src/bot/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "keywords": ["telegram", "bot", "telegraf", "prisma", "supabase"],
+  "author": "Kelvin Feh",
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^5.0.0",
+    "axios": "^1.6.8",
+    "dotenv": "^16.3.1",
+    "telegraf": "^4.17.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3",
+    "prisma": "^5.0.0"
+  }
+}
