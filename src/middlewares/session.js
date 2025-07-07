@@ -1,5 +1,12 @@
 import { session } from 'telegraf';
 
+export default function safeSession() {
+  return async (ctx, next) => {
+    if (!ctx || !ctx.update) return next();
+    return session()(ctx, next);
+  };
+}
+
 // export default function safeSession() {
 //   const sessionMiddleware = session();
 //   return async (ctx, next) => {
@@ -9,5 +16,3 @@ import { session } from 'telegraf';
 //     return next();
 //   };
 // }
-
-export default session();

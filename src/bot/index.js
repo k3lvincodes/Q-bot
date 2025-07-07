@@ -1,13 +1,13 @@
 // src/bot/index.js
 
 import { Telegraf } from 'telegraf';
-import session from '../middlewares/session.js';
+import safeSession from '../middlewares/session.js';
 import { prisma } from '../db/client.js';
 import { showMainMenu } from '../utils/menu.js';
 import axios from 'axios';
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-bot.use(session());
+bot.use(safeSession());
 
 bot.start(async (ctx) => {
   const telegramId = String(ctx.from.id);
