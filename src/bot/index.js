@@ -1,11 +1,11 @@
 // src/bot/index.js
 
 import { Telegraf } from 'telegraf';
+import express from 'express';
 import safeSession from '../middlewares/session.js';
 import { prisma } from '../db/client.js';
 import { showMainMenu } from '../utils/menu.js';
 import axios from 'axios';
-import express from 'express';
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(safeSession());
@@ -134,17 +134,15 @@ const WEBHOOK_PATH = '/';
 
 if (process.env.RENDER === 'true') {
   const app = express();
-
-  app.use(bot.webhookCallback(WEBHOOK_PATH));
-
+  app.use(bot.webhookCallback('/'));
   app.get('/', (req, res) => {
-    res.send('🤖 Q Bot is running.');
+    res.send('🤖 Q Bot is live on Render');
   });
 
   const port = process.env.PORT || 3000;
   app.listen(port, () => {
-    console.log(`🚀 Q Bot is running on port ${port}`);
+    console.log(`✅ Bot running on port ${port}`);
   });
 } else {
-  bot.launch();
+  bot.launch(); // For local development (polling)
 }
