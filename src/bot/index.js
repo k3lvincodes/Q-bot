@@ -5,6 +5,7 @@ import safeSession from '../middlewares/session.js';
 import { prisma } from '../db/client.js';
 import { showMainMenu } from '../utils/menu.js';
 import axios from 'axios';
+import express from 'express';
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(safeSession());
@@ -118,13 +119,32 @@ bot.action('ADMIN_CITY', async (ctx) => {
   }
 });
 
+// if (process.env.RENDER === 'true') {
+//   bot.launch({
+//     webhook: {
+//       domain: process.env.RENDER_EXTERNAL_URL,
+//       port: process.env.PORT || 3000,
+//     }
+//   });
+// } else {
+//   bot.launch(); // for local dev
+// }
+
+const WEBHOOK_PATH = '/';
+
 if (process.env.RENDER === 'true') {
-  bot.launch({
-    webhook: {
-      domain: process.env.RENDER_EXTERNAL_URL,
-      port: process.env.PORT || 3000,
-    }
+  const app = express();
+
+  app.use(bot.webhookCallback(WEBHOOK_PATH));
+
+  app.get('/', (req, res) => {
+    res.send('🤖 Q Bot is running.');
+  });
+
+  const port = process.env.PORT || 3000;
+  app.listen(port, () => {
+    console.log(`🚀 Q Bot is running on port ${port}`);
   });
 } else {
-  bot.launch(); // for local dev
+  bot.launch();
 }
