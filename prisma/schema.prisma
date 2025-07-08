@@ -23,3 +23,22 @@ model users {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 }
+
+model subscription {
+  id            Int      @id @default(autoincrement())
+  userId        String
+  subPlan       String
+  subSlot       Int
+  subRemSlot    Int
+  subDuration   Int
+  subAmount     Int
+  subEmail      String
+  subPassword   String
+  status        String   @default("pending")
+  subId         String   @unique
+  subCategory   String
+  subSubCategory String
+  crew          String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
