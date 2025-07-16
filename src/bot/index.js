@@ -10,40 +10,78 @@ import {
   handleSubCategorySelection,
   handlePlanSelection
 } from './workflows/add-subscription.js';
-import subscriptionAmounts from '../utils/subscription-prices.js';
+import subscriptionPrices from '../utils/subscription-prices.js';
+
+function escapeMarkdownV2(text) {
+  return (text || '')
+    .toString()
+    .replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+}
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(safeSession());
 
-// Handle /start
-bot.start(async (ctx) => {
-  const telegramId = String(ctx.from.id);
-  const fullName = ctx.from.first_name + (ctx.from.last_name ? ' ' + ctx.from.last_name : '');
-  ctx.session.userId = telegramId;
+bot.use(async (ctx, next) => {
+  const now = Date.now();
 
-  const user = await prisma.users.findUnique({ where: { userId: telegramId } });
-
-  if (user) {
-    ctx.session.persistentUser = 'yes';
-    ctx.session.email = user.email;
-    ctx.session.firstName = user.fullName?.split(' ')[0] || '';
-    ctx.session.admin = user.admin ? 'yes' : 'no';
-
-    await ctx.reply(`Welcome back to Q by Cratebux ${ctx.session.firstName}!`);
-    return showMainMenu(ctx);
-  } else {
-    ctx.session.persistentUser = 'no';
-    ctx.session.platform = 'telegram';
-    await ctx.reply(`Welcome to Q! Please enter your full name:`);
-    ctx.session.step = 'collectFullName';
+  // If no previous activity recorded, set it now and proceed
+  if (!ctx.session.lastActive) {
+    ctx.session.lastActive = now;
+    return next();
   }
+
+  const inactiveThreshold = 10 * 60 * 1000; // 10 minutes
+  const timeSinceLast = now - ctx.session.lastActive;
+
+  // If user was inactive too long
+  if (timeSinceLast > inactiveThreshold) {
+    ctx.session.step = null;
+    ctx.session.subCat = null;
+    ctx.session.subSubCat = null;
+    ctx.session.subPlan = null;
+    ctx.session.subAmount = null;
+    ctx.session.lastActive = now; // Reset timer here so it doesn't loop
+
+    await ctx.reply('⏳ You were inactive for a while. Back to Main Menu.');
+    return showMainMenu(ctx);
+  }
+
+  // User is still active — update lastActive and continue
+  ctx.session.lastActive = now;
+  return next();
 });
 
-// Text listener for form steps
-bot.on('text', async (ctx) => {
+bot.on('text', async (ctx, next) => {
+  const telegramId = String(ctx.from.id);
+  ctx.session.userId = telegramId;
   const text = ctx.message.text;
+
+  if (text === 'List Another Subscription') {
+    ctx.session.step = null;
+    return addSubscriptionWorkflow(ctx);
+  }
+
+  if (!ctx.session.email) {
+    const user = await prisma.users.findUnique({ where: { userId: telegramId } });
+
+    if (user) {
+      ctx.session.persistentUser = 'yes';
+      ctx.session.email = user.email;
+      ctx.session.firstName = user.fullName?.split(' ')[0] || '';
+      ctx.session.admin = user.admin ? 'yes' : 'no';
+
+      await ctx.reply(`Welcome back to Q by Cratebux ${ctx.session.firstName}!`);
+      return showMainMenu(ctx);
+    } else {
+      ctx.session.persistentUser = 'no';
+      ctx.session.platform = 'telegram';
+      await ctx.reply(`Welcome to Q! Please enter your full name:`);
+      ctx.session.step = 'collectFullName';
+      return;
+    }
+  }
 
   if (ctx.session.step === 'collectFullName') {
     if (!text.trim().includes(' ')) return ctx.reply('Please enter your full name (first and last).');
@@ -100,25 +138,10 @@ bot.on('text', async (ctx) => {
     return showMainMenu(ctx);
   }
 
-  // Plan input steps
-  if (ctx.session.step === 'selectPlan') {
-    const plan = text.trim();
-    if (!ctx.session.availablePlans.includes(plan)) return ctx.reply('❌ Invalid choice. Please select a valid plan.');
-    if (plan === 'Return to Category') return addSubscriptionWorkflow(ctx);
-
-    ctx.session.subPlan = plan;
-    const baseAmount = subscriptionAmounts[plan] || 0;
-    ctx.session.subAmount = baseAmount + 200;
-
-    ctx.session.step = 'enterSlot';
-    return ctx.reply(`You selected ${plan}. How many available slots (e.g. 1, 2, 3...)?`);
-  }
-
   if (ctx.session.step === 'enterSlot') {
     const slot = parseInt(text.trim());
     if (isNaN(slot) || slot <= 0) return ctx.reply('❌ Enter a valid number of slots.');
     ctx.session.subSlot = slot;
-
     ctx.session.step = 'shareType';
     return ctx.reply('How will you share access?', Markup.keyboard(['Login Details', 'OTP (User contacts you on WhatsApp)']).oneTime().resize());
   }
@@ -128,7 +151,7 @@ bot.on('text', async (ctx) => {
     if (type === 'Login Details') {
       ctx.session.shareType = 'login';
       ctx.session.step = 'enterEmail';
-      return ctx.reply('Enter subscription login email:');
+      return ctx.reply('Enter Subscription Login Email:');
     } else if (type === 'OTP (User contacts you on WhatsApp)') {
       ctx.session.shareType = 'otp';
       ctx.session.step = 'enterWhatsApp';
@@ -141,21 +164,22 @@ bot.on('text', async (ctx) => {
   if (ctx.session.step === 'enterEmail') {
     ctx.session.subEmail = text.trim();
     ctx.session.step = 'enterPassword';
-    return ctx.reply('Enter subscription login password:');
+    return ctx.reply('Enter Subscription Login Password:');
   }
 
   if (ctx.session.step === 'enterPassword') {
     ctx.session.subPassword = text.trim();
     ctx.session.step = 'selectDuration';
-    return ctx.reply('Select monthly duration (1–12):', Markup.keyboard([...Array(12)].map((_, i) => `${i + 1}`)).oneTime().resize());
+    return ctx.reply('Enter listing monthly duration (1–12):', Markup.keyboard([...Array(12)].map((_, i) => `${i + 1}`)).oneTime().resize());
   }
 
   if (ctx.session.step === 'enterWhatsApp') {
-    ctx.session.whatsappNo = text.trim();
-    ctx.session.subEmail = ctx.session.whatsappNo;
-    ctx.session.subPassword = ctx.session.whatsappNo;
+    const number = text.trim();
+    ctx.session.subEmail = number;
+    ctx.session.subPassword = number;
+    ctx.session.whatsappNo = number;
     ctx.session.step = 'selectDuration';
-    return ctx.reply('Select monthly duration (1–12):', Markup.keyboard([...Array(12)].map((_, i) => `${i + 1}`)).oneTime().resize());
+    return ctx.reply('Enter listing monthly duration (1–12):', Markup.keyboard([...Array(12)].map((_, i) => `${i + 1}`)).oneTime().resize());
   }
 
   if (ctx.session.step === 'selectDuration') {
@@ -163,49 +187,45 @@ bot.on('text', async (ctx) => {
     if (isNaN(months) || months < 1 || months > 12) return ctx.reply('❌ Choose between 1–12 months.');
     ctx.session.subDuration = months;
 
-    // Generate unique subId
+    const generateRandomCode = () => {
+      return 'Q_' + Math.random().toString(36).substring(2, 7).toUpperCase();
+    };
+
     let subId;
     let existing;
     do {
-      subId = 'Q_' + Math.random().toString(36).substring(2, 7).toUpperCase();
+      subId = generateRandomCode();
       existing = await prisma.subscription.findMany({ where: { subId } });
     } while (existing.length > 0);
 
     ctx.session.subId = subId;
 
-    // Send Telegram admin notification
-    const botToken = process.env.BOT_TOKEN;
+    const escape = (text) => (text || 'None').toString().replace(/([_\*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+
+    const msg =
+      `*New Subscription Request:*\n\n` +
+      `*Subscription ID:* ${escape(subId)}\n` +
+      `*User ID:* ${escape(ctx.session.userId)}\n` +
+      `*Subscription Name:* ${escape(ctx.session.subPlan)}\n` +
+      `*Slots:* ${escape(ctx.session.subSlot)}\n` +
+      `*Duration:* ${escape(months)} month(s)\n` +
+      `*Category:* ${escape(ctx.session.subCat)}\n` +
+      `*Subcategory:* ${escape(ctx.session.subSubCat)}\n` +
+      `*Monthly Amount:* ₦${escape(ctx.session.subAmount)}\n` +
+      `*Login:* ${escape(ctx.session.subEmail)}\n` +
+      `*Pass:* ${escape(ctx.session.subPassword)}\n` +
+      `*Time:* ${escape(new Date().toISOString())}`;
+
+    const apiUrl = `https://api.telegram.org/bot${process.env.PREVIEW_BOT_TOKEN}/sendMessage`;
     const chatIds = ['6632021617', '7193164208'];
-    const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
-
-    const escape = (t) => (t || 'None').toString().replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
-    const msg = `
-*New Subscription Request:*
-*ID:* ${escape(subId)}
-*User ID:* ${escape(ctx.session.userId)}
-*Plan:* ${escape(ctx.session.subPlan)}
-*Slots:* ${escape(ctx.session.subSlot)}
-*Duration:* ${escape(ctx.session.subDuration)} month(s)
-*Category:* ${escape(ctx.session.subCat)}
-*Sub:* ${escape(ctx.session.subSubCat)}
-*Monthly Amount:* ₦${escape(ctx.session.subAmount)}
-*Login:* ${escape(ctx.session.subEmail)}
-*Pass:* ${escape(ctx.session.subPassword)}
-*Time:* ${escape(new Date().toISOString())}`;
-
     for (const chatId of chatIds) {
       await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: msg,
-          parse_mode: 'MarkdownV2',
-        }),
+        body: JSON.stringify({ chat_id: chatId, text: msg, parse_mode: 'MarkdownV2' }),
       });
     }
 
-    // Save to DB
     await prisma.subscription.create({
       data: {
         userId: ctx.session.userId,
@@ -225,35 +245,48 @@ bot.on('text', async (ctx) => {
     });
 
     ctx.session.step = null;
-
     await ctx.reply('✅ Your listing has been sent to Q Team for confirmation. You will receive an email update.');
     return ctx.reply('What do you want to do next?', Markup.keyboard(['List Another Subscription', 'Go to Main Menu']).oneTime().resize());
   }
+
+  if (next) return next();
 });
 
-// ✅ Add My Subscription button handler
 bot.action('ADD_SUB', async (ctx) => {
   await ctx.answerCbQuery();
   return addSubscriptionWorkflow(ctx);
 });
 
-// ✅ Handle category clicks
 bot.action(/^CATEGORY_(.+)$/, (ctx) => {
   const category = ctx.match[1].replace(/_/g, ' ');
   return handleSubCategorySelection(ctx, category);
 });
 
-// ✅ Handle subcategory clicks
 bot.action(/^SUBCATEGORY_(.+)$/, (ctx) => {
   const sub = ctx.match[1].replace(/_/g, ' ');
   return handlePlanSelection(ctx, sub);
 });
 
-// ✅ Navigation
+bot.action(/^PLAN_ID_(.+)$/, (ctx) => {
+  const plan = Buffer.from(ctx.match[1], 'base64').toString('utf-8');
+  if (!subscriptionPrices[plan]) {
+    return ctx.reply('❌ Plan not found. Please select again.');
+  }
+
+  ctx.session.subPlan = plan;
+  ctx.session.subAmount = subscriptionPrices[plan] + 200;
+  ctx.session.step = 'enterSlot';
+
+  const safePlan = escapeMarkdownV2(plan);
+  return ctx.reply(
+    `You have selected *${safePlan}*\nEnter number of available slots \\(e\\.g\\. 1, 2, 3\\.\\.\\.\\):`,
+    { parse_mode: 'MarkdownV2' }
+  );
+});
+
 bot.action('RETURN_TO_CATEGORY', (ctx) => addSubscriptionWorkflow(ctx));
 bot.action('RETURN_TO_MAIN_MENU', (ctx) => showMainMenu(ctx));
 
-// ✅ Webhook or Polling
 if (process.env.RENDER === 'true') {
   const app = express();
   app.use(bot.webhookCallback('/'));
@@ -263,5 +296,3 @@ if (process.env.RENDER === 'true') {
 } else {
   bot.launch();
 }
-
-// export { bot };

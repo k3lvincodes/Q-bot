@@ -1,4 +1,4 @@
-export default {
+const subscriptionAmounts = {
   'Netflix Standard': 1300,
   'Netflix Premium': 1700,
   'Hulu + Live TV (2 Users Max)': 60000,
@@ -24,7 +24,7 @@ export default {
   'Pandora Premium Family': 4400,
   'LinkedIn Learning Teams (multi-user)': 45000,
   'Skillshare Teams (multi-user)': 20000,
-  'Peloton All-Access (unlimited household slots)': 5000,
+  'Peloton All-Access (household)': 5000,
   'Calm Family Plan': 30000,
   'Headspace Family Plan': 30000,
   'Apple Fitness+ Family': 250,
@@ -39,8 +39,10 @@ export default {
   'Audible Household Library': 1250,
   'Scribd Family': 600,
   'Kindle Unlimited Household Sharing': 900,
-  'Canva for Teams': 4000,
-  'Adobe Creative Cloud Teams': 10000,
+  'Canva for Teams (multi-user)': 4000,
+  'Adobe Creative Cloud Teams (multi-user)': 10000,
   'ABCmouse': 750,
   'Epic!': 680
 };
+
+export default subscriptionAmounts;
