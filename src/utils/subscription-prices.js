@@ -1,4 +1,4 @@
-const subscriptionAmounts = {
+const subscriptionPlansMap = {
   'Netflix Standard': 1300,
   'Netflix Premium': 1700,
   'Hulu + Live TV (2 Users Max)': 60000,
@@ -45,4 +45,10 @@ const subscriptionAmounts = {
   'Epic!': 680
 };
 
-export default subscriptionAmounts;
+const planIdMap = Object.keys(subscriptionPlansMap).reduce((acc, plan, index) => {
+  acc[plan] = `P${index}`;
+  return acc;
+}, {});
+
+export default subscriptionPlansMap;
+export { planIdMap };

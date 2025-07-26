@@ -1,5 +1,6 @@
+// src/bot/workflows/add-subscription.js
 import { Markup } from 'telegraf';
-import subscriptionPlansMap from '../../utils/subscription-prices.js';
+import subscriptionPlansMap, { planIdMap } from '../../utils/subscription-prices.js';
 
 function escapeMarkdownV2(text) {
   return (text || '')
@@ -25,12 +26,14 @@ export const addSubscriptionWorkflow = async (ctx) => {
     'Books and Audiobooks',
     'Software and Design Tools',
     'Kids and Family',
-    'Return to Main Menu'
   ];
 
-  await ctx.reply('🎬 Welcome to Add My Subscription!\n\nPlease select a category:', Markup.inlineKeyboard(
-    categories.map((c) => [Markup.button.callback(c, `CATEGORY_${c.replace(/ /g, '_')}`)])
-  ));
+  const buttons = categories.map((c) => [
+    Markup.button.callback(c, `CATEGORY_${c.replace(/ /g, '_')}`)
+  ]);
+  buttons.push([Markup.button.callback('Return to Main Menu', 'RETURN_TO_MAIN_MENU')]);
+
+  await ctx.reply('🎬 Welcome to Add My Subscription!\n\nPlease select a category:', Markup.inlineKeyboard(buttons));
 };
 
 export const handleSubCategorySelection = async (ctx, category) => {
@@ -55,7 +58,7 @@ export const handleSubCategorySelection = async (ctx, category) => {
   const options = subcategoriesMap[category] || [];
   options.push('Return to Category');
 
-  const escapedCat = escapeMarkdownV2(category); // ✅ Corrected from subSubCat to category
+  const escapedCat = escapeMarkdownV2(category);
   await ctx.editMessageText(`📂 You selected: *${escapedCat}*\n\nNow choose a subcategory:`, {
     parse_mode: 'MarkdownV2',
     ...Markup.inlineKeyboard(
@@ -71,22 +74,37 @@ export const handlePlanSelection = async (ctx, subSubCat) => {
   ctx.session.subPlan = null;
   ctx.session.subAmount = null;
 
-  const plans = Object.keys(subscriptionPlansMap).filter((plan) => plan.toLowerCase().includes(subSubCat.toLowerCase()));
+  const plans = Object.keys(subscriptionPlansMap).filter((plan) =>
+    plan.toLowerCase().includes(subSubCat.toLowerCase())
+  );
 
   if (plans.length === 0) {
     await ctx.reply('❌ No plans available for this selection.');
     return addSubscriptionWorkflow(ctx);
   }
 
-  const buttons = plans.map((plan) => [
-    Markup.button.callback(plan, `PLAN_ID_${Buffer.from(plan).toString('base64')}`)
-  ]);
+  const buttons = plans.map((plan) => {
+    const planId = planIdMap[plan];
+    const callbackData = `PLAN_ID_${planId}`;
+    if (callbackData.length > 64) {
+      console.error(`Callback data too long for plan "${plan}": ${callbackData}`);
+      return null;
+    }
+    return [Markup.button.callback(plan, callbackData)];
+  }).filter(Boolean);
   buttons.push([Markup.button.callback('Return to Category', 'RETURN_TO_CATEGORY')]);
 
-  await ctx.editMessageText(
-    `📺 You selected: *${escapeMarkdownV2(subSubCat)}*\n\nNow choose a plan:`, {
-      parse_mode: 'MarkdownV2',
-      ...Markup.inlineKeyboard(buttons)
-    }
-  );
+  try {
+    await ctx.editMessageText(
+      `📺 You selected: *${escapeMarkdownV2(subSubCat)}*\n\nNow choose a plan:`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard(buttons)
+      }
+    );
+  } catch (err) {
+    console.error('Failed to edit message:', err.message);
+    await ctx.reply('❌ Error loading plans. Please try again.');
+    return addSubscriptionWorkflow(ctx);
+  }
 };
