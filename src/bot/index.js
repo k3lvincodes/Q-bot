@@ -1,51 +1,91 @@
-// src/bot/index.js
 import { Telegraf, Markup } from 'telegraf';
 import express from 'express';
+import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
 import safeSession from '../middlewares/session.js';
 import { prisma } from '../db/client.js';
 import { showMainMenu } from '../utils/menu.js';
 import axios from 'axios';
 import fetch from 'node-fetch';
+import logger from '../utils/logger.js';
+import { startCronJobs } from '../utils/cron.js';
 import {
   addSubscriptionWorkflow,
   handleSubCategorySelection,
-  handlePlanSelection
+  handlePlanSelection,
+  handleDurationSelection,
 } from './workflows/add-subscription.js';
+import {
+  browseSubscriptionsWorkflow,
+  handleBrowseCategorySelection,
+  handleBrowseSubcategorySelection,
+  handleSubscriptionSelection,
+  initiatePayment,
+  verifyPayment,
+  cancelPayment,
+} from './workflows/browse-subscriptions.js';
+import {
+  mySubscriptionsWorkflow,
+  showListedSubscriptions,
+  showJoinedSubscriptions,
+  unlistSubscription,
+  updateSubscription,
+  handleUpdateSlots,
+  handleUpdateDuration,
+  renewSubscription,
+  leaveSubscription,
+  cancelLeaveRequest,
+} from './workflows/my-subscriptions.js';
 import subscriptionPrices, { planIdMap } from '../utils/subscription-prices.js';
-
-async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const response = await fetch(url, options);
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorBody}`);
-      }
-      return response;
-    } catch (err) {
-      if (i === retries - 1) throw err;
-      console.warn(`Retry ${i + 1}/${retries} for ${url}:`, err.message);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-}
-
-function escapeMarkdownV2(text) {
-  if (!text) return 'N/A';
-  return text
-    .toString()
-    .replace(/([_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\])/g, '\\$1');
-}
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const app = express();
+
+// Middleware to check for missing headers
+app.use((req, res, next) => {
+  if (!req.headers['content-type'] && !req.headers['transfer-encoding']) {
+    logger.warn('Missing content-type or transfer-encoding', { url: req.url });
+    return res.status(400).send('Bad Request: Missing content-type or transfer-encoding');
+  }
+  next();
+});
+
+// Use body-parser with error handling
+app.use(bodyParser.json({
+  verify: (req, res, buf) => {
+    try {
+      JSON.parse(buf.toString());
+    } catch (e) {
+      logger.error('Invalid JSON in request', { error: e.message });
+      res.status(400).send('Invalid JSON');
+      throw e;
+    }
+  }
+}));
+
+// Telegraf webhook
+app.use(bot.webhookCallback('/'));
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  logger.error('Express error', { error: err.message, stack: err.stack });
+  if (!res.headersSent) {
+    res.status(500).send('Internal Server Error');
+  }
+});
+
 bot.use(safeSession());
+startCronJobs();
 
 // Inactivity middleware
 bot.use(async (ctx, next) => {
   const now = Date.now();
+  if (!ctx.session) {
+    ctx.session = {};
+    logger.info('Initialized new session', { telegramId: ctx.from?.id });
+  }
   if (!ctx.session.lastActive) {
     ctx.session.lastActive = now;
     return next();
@@ -67,6 +107,30 @@ bot.use(async (ctx, next) => {
   return next();
 });
 
+function escapeMarkdownV2(text) {
+  if (!text) return 'N/A';
+  return text
+    .toString()
+    .replace(/([_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\])/g, '\\$1');
+}
+
+async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorBody}`);
+      }
+      return response;
+    } catch (err) {
+      logger.error(`Retry ${i + 1}/${retries} failed for ${url}`, { error: err.message });
+      if (i === retries - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 function clearListingSession(ctx) {
   ctx.session.step = null;
   ctx.session.subCat = null;
@@ -80,21 +144,45 @@ function clearListingSession(ctx) {
   ctx.session.shareType = null;
   ctx.session.whatsappNo = null;
   ctx.session.subId = null;
+  ctx.session.browseCategory = null;
+  ctx.session.browseSubcategory = null;
+  ctx.session.browsePage = null;
+  ctx.session.browseSort = null;
+  ctx.session.selectedSubId = null;
+  ctx.session.authUrl = null;
+  ctx.session.transferReference = null;
+  ctx.session.updateSubId = null;
+  ctx.session.updateSlots = null;
+  ctx.session.leaveSubId = null;
 }
 
 bot.on('text', async (ctx, next) => {
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
   const text = ctx.message.text;
+  logger.info('Received text input', { telegramId, text, step: ctx.session.step, session: { ...ctx.session } });
 
-  if (text === 'List Another Subscription') {
+  if (['Browse Subscriptions', 'My Subscriptions', 'Add My Subscription', 'Wallet / Payments', 'Support & FAQs', 'Profile / Settings', 'Admin City (Admins only)'].includes(text)) {
     clearListingSession(ctx);
-    return addSubscriptionWorkflow(ctx);
-  }
-
-  if (text === 'Go to Main Menu') {
-    clearListingSession(ctx);
-    return showMainMenu(ctx);
+    switch (text) {
+      case 'Browse Subscriptions':
+        return browseSubscriptionsWorkflow(ctx);
+      case 'My Subscriptions':
+        return mySubscriptionsWorkflow(ctx);
+      case 'Add My Subscription':
+        return addSubscriptionWorkflow(ctx);
+      case 'Wallet / Payments':
+        return ctx.reply('Wallet / Payments: Under construction.');
+      case 'Support & FAQs':
+        return ctx.reply('Support & FAQs: Under construction.');
+      case 'Profile / Settings':
+        return ctx.reply('Profile / Settings: Under construction.');
+      case 'Admin City (Admins only)':
+        if (ctx.session.admin !== 'true') {
+          return ctx.reply('❌ Access restricted to admins only.');
+        }
+        return ctx.reply('Admin City: Under construction.');
+    }
   }
 
   if (!ctx.session.email) {
@@ -103,32 +191,44 @@ bot.on('text', async (ctx, next) => {
       ctx.session.persistentUser = 'yes';
       ctx.session.email = user.email;
       ctx.session.firstName = user.fullName?.split(' ')[0] || '';
-      ctx.session.admin = user.admin ? 'yes' : 'no';
-      await ctx.reply(`Welcome back to Q by Cratebux ${ctx.session.firstName}!`);
+      ctx.session.admin = user.admin ? 'true' : 'false';
+      logger.info('User found in database', { telegramId, email: user.email });
+      await ctx.reply(`Welcome back to Q, ${ctx.session.firstName}!`);
       return showMainMenu(ctx);
     } else {
       ctx.session.persistentUser = 'no';
       ctx.session.platform = 'telegram';
-      await ctx.reply(`Welcome to Q! Please enter your full name:`);
       ctx.session.step = 'collectFullName';
+      logger.info('Initialized new user session', { telegramId, session: { ...ctx.session } });
+      await ctx.reply(`Welcome to Q! Please enter your full name:`);
       return;
     }
   }
 
   if (ctx.session.step === 'collectFullName') {
-    if (!text.trim().includes(' ')) return ctx.reply('Please enter your full name (first and last).');
+    if (!text.trim()) {
+      logger.warn('Empty full name input', { telegramId });
+      return ctx.reply('Please enter a valid full name.');
+    }
     ctx.session.fullName = text.trim();
-    ctx.session.firstName = text.trim().split(' ')[0];
+    ctx.session.firstName = text.trim().split(' ')[0] || text.trim();
     ctx.session.step = 'collectEmail';
+    logger.info('Advancing to collectEmail', { telegramId, fullName: ctx.session.fullName, session: { ...ctx.session } });
     return ctx.reply('Great! Now enter your email:');
   }
 
   if (ctx.session.step === 'collectEmail') {
     const email = text.trim().toLowerCase();
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) return ctx.reply('❌ Invalid email. Try again:');
+    if (!emailRegex.test(email)) {
+      logger.warn('Invalid email input', { telegramId, email });
+      return ctx.reply('❌ Invalid email. Try again:');
+    }
     const existing = await prisma.users.findFirst({ where: { email } });
-    if (existing) return ctx.reply('❌ Email already used. Enter another one:');
+    if (existing) {
+      logger.warn('Email already used', { telegramId, email });
+      return ctx.reply('❌ Email already used. Enter another one:');
+    }
     ctx.session.email = email;
     ctx.session.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
     ctx.session.step = 'verifyCode';
@@ -139,9 +239,11 @@ bot.on('text', async (ctx, next) => {
     };
     try {
       await axios.post('https://hook.eu2.make.com/1rzify472wbi8lzbkazby3yyb7ot9rhp', payload);
+      logger.info('Verification email sent', { telegramId, email });
     } catch (e) {
-      console.error('Email webhook failed:', e.message);
+      logger.error('Email webhook failed', { error: e.message, telegramId });
       await ctx.reply('❌ Failed to send verification email. Please try again.');
+      ctx.session.step = null;
       return showMainMenu(ctx);
     }
     return ctx.reply('✅ Enter the code sent to your email:');
@@ -149,154 +251,235 @@ bot.on('text', async (ctx, next) => {
 
   if (ctx.session.step === 'verifyCode') {
     if (text.trim() !== ctx.session.verificationCode) {
+      logger.warn('Incorrect verification code', { telegramId, input: text.trim() });
       return ctx.reply('❌ Incorrect code. Please try again:');
     }
-    await prisma.users.create({
-      data: {
-        userId: ctx.session.userId,
-        fullName: ctx.session.fullName,
-        email: ctx.session.email,
-        platform: ctx.session.platform,
-        admin: false,
-      },
-    });
-    ctx.session.step = null;
-    await ctx.reply("✅ You're now registered!");
-    return showMainMenu(ctx);
+    try {
+      await prisma.users.create({
+        data: {
+          userId: ctx.session.userId,
+          fullName: ctx.session.fullName,
+          email: ctx.session.email,
+          platform: ctx.session.platform,
+          admin: false,
+        },
+      });
+      ctx.session.step = null;
+      logger.info('User registered', { telegramId, email: ctx.session.email });
+      await ctx.reply("✅ You're now registered!");
+      return showMainMenu(ctx);
+    } catch (err) {
+      logger.error('Failed to register user', { error: err.message, stack: err.stack, telegramId });
+      ctx.session.step = null;
+      await ctx.reply('❌ Error registering user. Please start over.');
+      return showMainMenu(ctx);
+    }
   }
 
   if (ctx.session.step === 'enterSlot') {
     const slot = parseInt(text.trim());
-    if (isNaN(slot) || slot <= 0) return ctx.reply('❌ Enter a valid number of slots.');
+    if (isNaN(slot) || slot <= 0) {
+      logger.warn('Invalid slot input', { telegramId, input: text });
+      return ctx.reply('❌ Enter a valid number of slots.');
+    }
     ctx.session.subSlot = slot;
     ctx.session.step = 'shareType';
-    return ctx.reply('How will you share access?', Markup.keyboard(['Login Details', 'OTP (User contacts you on WhatsApp)']).oneTime().resize());
-  }
-
-  if (ctx.session.step === 'shareType') {
-    const type = text.trim();
-    if (type === 'Login Details') {
-      ctx.session.shareType = 'login';
-      ctx.session.step = 'enterEmail';
-      return ctx.reply('Enter Subscription Login Email:');
-    } else if (type === 'OTP (User contacts you on WhatsApp)') {
-      ctx.session.shareType = 'otp';
-      ctx.session.step = 'enterWhatsApp';
-      return ctx.reply('Enter your WhatsApp number (with country code):');
-    } else {
-      return ctx.reply('❌ Invalid choice.');
-    }
+    logger.info('Set shareType step', { telegramId, subSlot: slot });
+    return ctx.reply(
+      'How will you share access?',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Login Details', 'SHARE_LOGIN')],
+        [Markup.button.callback('OTP (User contacts you on WhatsApp)', 'SHARE_OTP')],
+      ])
+    );
   }
 
   if (ctx.session.step === 'enterEmail') {
     ctx.session.subEmail = text.trim();
     ctx.session.step = 'enterPassword';
+    logger.info('Set subEmail', { telegramId, subEmail: text.trim() });
     return ctx.reply('Enter Subscription Login Password:');
   }
 
   if (ctx.session.step === 'enterPassword') {
     ctx.session.subPassword = text.trim();
     ctx.session.step = 'selectDuration';
-    return ctx.reply('Enter listing monthly duration (1–12):', Markup.keyboard([...Array(12)].map((_, i) => `${i + 1}`)).oneTime().resize());
+    logger.info('Set subPassword', { telegramId });
+    return ctx.reply(
+      'Enter listing monthly duration (1–12):',
+      Markup.inlineKeyboard(
+        [...Array(12)].map((_, i) => [Markup.button.callback(`${i + 1}`, `DURATION_${i + 1}`)])
+      )
+    );
   }
 
   if (ctx.session.step === 'enterWhatsApp') {
     const number = text.trim();
-    const phoneRegex = /^\+\d{10,15}$/;
-    if (!phoneRegex.test(number)) return ctx.reply('❌ Invalid WhatsApp number (e.g., +1234567890). Try again:');
+    if (!/^\+\d{10,15}$/.test(number)) {
+      logger.warn('Invalid WhatsApp number', { telegramId, input: number });
+      return ctx.reply('❌ Invalid WhatsApp number (e.g., +1234567890). Try again:');
+    }
     ctx.session.subEmail = number;
-    ctx.session.subPassword = number;
+    ctx.session.subPassword = '';
     ctx.session.whatsappNo = number;
     ctx.session.step = 'selectDuration';
-    return ctx.reply('Enter listing monthly duration (1–12):', Markup.keyboard([...Array(12)].map((_, i) => `${i + 1}`)).oneTime().resize());
+    logger.info('Set WhatsApp number', { telegramId, whatsappNo: number });
+    return ctx.reply(
+      'Enter duration (1–12):',
+      Markup.inlineKeyboard(
+        [...Array(12)].map((_, i) => [Markup.button.callback(`${i + 1}`, `DURATION_${i + 1}`)])
+      )
+    );
   }
 
-  if (ctx.session.step === 'selectDuration') {
-    const months = parseInt(text.trim());
-    if (isNaN(months) || months < 1 || months > 12) return ctx.reply('❌ Choose between 1–12 months.');
-    ctx.session.subDuration = months;
+  if (ctx.session.step === 'updateSlots') {
+    return handleUpdateSlots(ctx, text);
+  }
 
-    const generateRandomCode = () => {
-      return 'Q_' + Math.random().toString(36).substring(2, 7).toUpperCase();
-    };
-
-    let subId;
-    let existing;
-    do {
-      subId = generateRandomCode();
-      existing = await prisma.subscription.findMany({ where: { subId } });
-    } while (existing.length > 0);
-
-    ctx.session.subId = subId;
-
-    const escape = escapeMarkdownV2;
-    const safe = (value) => escape(value?.toString()); // Ensure string conversion
-    // Log session data for debugging
-    console.log('Session data for confirmation:', {
-      subId: ctx.session.subId,
-      subPlan: ctx.session.subPlan,
-      subSlot: ctx.session.subSlot,
-      subDuration: ctx.session.subDuration,
-      subCat: ctx.session.subCat,
-      subSubCat: ctx.session.subSubCat,
-      subAmount: ctx.session.subAmount,
-      subEmail: ctx.session.subEmail,
-      subPassword: ctx.session.subPassword,
-      whatsappNo: ctx.session.whatsAppNo,
-      shareType: ctx.session.shareType
-    });
-
-    const msg =
-      `*Confirm Your Subscription Details:*\n\n` +
-      `**Subscription ID:** ${safe(ctx.session.subId)}\n` +
-      `**Subscription Name:** ${safe(ctx.session.subPlan)}\n` +
-      `**Slots:** ${safe(ctx.session.subSlot)}\n` +
-      `**Duration:** ${safe(ctx.session.subDuration)} month(s)\n` +
-      `**Category:** ${safe(ctx.session.subCat)}\n` +
-      `**Subcategory:** ${safe(ctx.session.subSubCat)}\n` +
-      `**Monthly Amount:** ₦${safe(ctx.session.subAmount)}\n` +
-      `**Login Email/WhatsApp:** ${safe(ctx.session.subEmail)}\n` +
-      `**Password:** ${safe(ctx.session.subPassword)}\n` +
-      (ctx.session.shareType === 'otp' ? `**WhatsApp Number:** ${safe(ctx.session.whatsappNo)}\n` : '') +
-      `Please review and confirm or cancel.`;
-
-    ctx.session.step = 'confirmSubscription';
-    try {
-      await ctx.reply(msg, {
-        parse_mode: 'MarkdownV2',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('Confirm', 'CONFIRM_SUBSCRIPTION')],
-          [Markup.button.callback('Cancel', 'CANCEL_SUB')]
-        ])
-      });
-    } catch (err) {
-      console.error('Failed to send confirmation message:', err.message, 'Message:', msg);
-      // Fallback to plain text
-      const plainMsg =
-        `Confirm Your Subscription Details:\n\n` +
-        `Subscription ID: ${ctx.session.subId}\n` +
-        `Subscription Name: ${ctx.session.subPlan}\n` +
-        `Slots: ${ctx.session.subSlot}\n` +
-        `Duration: ${ctx.session.subDuration} month(s)\n` +
-        `Category: ${ctx.session.subCat}\n` +
-        `Subcategory: ${ctx.session.subSubCat}\n` +
-        `Monthly Amount: ₦${ctx.session.subAmount}\n` +
-        `Login Email/WhatsApp: ${ctx.session.subEmail}\n` +
-        `Password: ${ctx.session.subPassword}\n` +
-        (ctx.session.shareType === 'otp' ? `WhatsApp Number: ${ctx.session.whatsappNo}\n` : '') +
-        `Please review and confirm or cancel.`;
-      await ctx.reply(plainMsg, Markup.inlineKeyboard([
-        [Markup.button.callback('Confirm', 'CONFIRM_SUBSCRIPTION')],
-        [Markup.button.callback('Cancel', 'CANCEL_SUB')]
-      ]));
-    }
+  if (ctx.session.step === 'updateDuration') {
+    return handleUpdateDuration(ctx, text);
   }
 
   if (next) return next();
 });
 
+bot.action('BROWSE', async (ctx) => {
+  await ctx.answerCbQuery();
+  clearListingSession(ctx);
+  return browseSubscriptionsWorkflow(ctx);
+});
+
+bot.action(/^BROWSE_CAT_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const category = ctx.match[1].replace(/_/g, ' ');
+  return handleBrowseCategorySelection(ctx, category);
+});
+
+bot.action(/^BROWSE_SUBCAT_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subcategory = ctx.match[1].replace(/_/g, ' ');
+  return handleBrowseSubcategorySelection(ctx, subcategory);
+});
+
+bot.action('BROWSE_BACK', async (ctx) => {
+  await ctx.answerCbQuery();
+  return browseSubscriptionsWorkflow(ctx);
+});
+
+bot.action('BROWSE_PREV', async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.browsePage = Math.max(0, ctx.session.browsePage - 1);
+  return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
+});
+
+bot.action('BROWSE_NEXT', async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.browsePage += 1;
+  return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
+});
+
+bot.action('SORT_NEWEST', async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.browseSort = 'newest';
+  ctx.session.browsePage = 0;
+  return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
+});
+
+bot.action('SORT_OLDEST', async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.browseSort = 'oldest';
+  ctx.session.browsePage = 0;
+  return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
+});
+
+bot.action('SORT_VERIFIED', async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.browseSort = 'verified';
+  ctx.session.browsePage = 0;
+  return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
+});
+
+bot.action(/^SELECT_SUB_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subId = ctx.match[1];
+  return handleSubscriptionSelection(ctx, subId);
+});
+
+bot.action('PAY_SUB', async (ctx) => {
+  await ctx.answerCbQuery();
+  return initiatePayment(ctx);
+});
+
+bot.action('VERIFY_PAYMENT', async (ctx) => {
+  await ctx.answerCbQuery();
+  return verifyPayment(ctx);
+});
+
+bot.action('CANCEL_PAYMENT', async (ctx) => {
+  await ctx.answerCbQuery();
+  return cancelPayment(ctx);
+});
+
+bot.action('BROWSE_SUBS', async (ctx) => {
+  await ctx.answerCbQuery();
+  return browseSubscriptionsWorkflow(ctx);
+});
+
+bot.action('MY_SUBS', async (ctx) => {
+  await ctx.answerCbQuery();
+  clearListingSession(ctx);
+  return mySubscriptionsWorkflow(ctx);
+});
+
+bot.action('LISTED_SUBS', async (ctx) => {
+  await ctx.answerCbQuery();
+  return showListedSubscriptions(ctx);
+});
+
+bot.action('JOINED_SUBS', async (ctx) => {
+  await ctx.answerCbQuery();
+  return showJoinedSubscriptions(ctx);
+});
+
+bot.action(/^UNLIST_SUB_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subId = ctx.match[1];
+  return unlistSubscription(ctx, subId);
+});
+
+bot.action(/^UPDATE_SUB_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subId = ctx.match[1];
+  return updateSubscription(ctx, subId);
+});
+
+bot.action(/^RENEW_SUB_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subId = ctx.match[1];
+  return renewSubscription(ctx, subId);
+});
+
+bot.action(/^LEAVE_SUB_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subId = ctx.match[1];
+  return leaveSubscription(ctx, subId);
+});
+
+bot.action(/^CONFIRM_LEAVE_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subId = ctx.match[1];
+  return leaveSubscription(ctx, subId, true);
+});
+
+bot.action(/^CANCEL_LEAVE_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const subId = ctx.match[1];
+  return cancelLeaveRequest(ctx, subId);
+});
+
 bot.action('ADD_SUB', async (ctx) => {
   await ctx.answerCbQuery();
+  clearListingSession(ctx);
   return addSubscriptionWorkflow(ctx);
 });
 
@@ -317,18 +500,36 @@ bot.action(/^PLAN_ID_(.+)$/, async (ctx) => {
   const planId = ctx.match[1];
   const plan = Object.keys(planIdMap).find((p) => planIdMap[p] === planId);
   if (!plan || !subscriptionPrices[plan]) {
+    logger.warn('Plan not found', { planId });
     return ctx.reply('❌ Plan not found. Please select again.');
   }
 
   ctx.session.subPlan = plan;
   ctx.session.subAmount = subscriptionPrices[plan] + 200;
   ctx.session.step = 'enterSlot';
+  logger.info('Plan selected', { telegramId: ctx.from.id, plan, subAmount: ctx.session.subAmount });
 
   const safePlan = escapeMarkdownV2(plan);
   return ctx.reply(
     `You have selected *${safePlan}*\nEnter number of available slots \\(e\\.g\\. 1, 2, 3\\.\\.\\.\\):`,
     { parse_mode: 'MarkdownV2' }
   );
+});
+
+bot.action('SHARE_LOGIN', async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.shareType = 'login';
+  ctx.session.step = 'enterEmail';
+  logger.info('Set shareType to login', { telegramId: ctx.from.id });
+  return ctx.reply('Enter Subscription Login Email:');
+});
+
+bot.action('SHARE_OTP', async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.shareType = 'otp';
+  ctx.session.step = 'enterWhatsApp';
+  logger.info('Set shareType to otp', { telegramId: ctx.from.id });
+  return ctx.reply('Enter your WhatsApp number (with country code):');
 });
 
 bot.action('RETURN_TO_CATEGORY', async (ctx) => {
@@ -353,51 +554,49 @@ bot.action('CONFIRM_SUBSCRIPTION', async (ctx) => {
     `**User ID:** ${safe(ctx.session.userId)}\n` +
     `**Subscription:** ${safe(ctx.session.subPlan)}\n` +
     `**Slots:** ${safe(ctx.session.subSlot)}\n` +
-    `**Duration:** ${safe(ctx.session.subDuration)} month(s)\n` +
+    `**Duration:** ${safe(ctx.session.subDuration)}\n` +
     `**Category:** ${safe(ctx.session.subCat)}\n` +
     `**Subcategory:** ${safe(ctx.session.subSubCat)}\n` +
     `**Monthly Amount:** ₦${safe(ctx.session.subAmount)}\n` +
     `**Login Email/WhatsApp:** ${safe(ctx.session.subEmail)}\n` +
-    `**Password:** ${safe(ctx.session.subPassword.slice(0, 3) + '****')}\n` +
+    `**Password:** ${safe(ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A')}\n` +
     `**Time:** ${safe(new Date().toISOString())}\n`;
 
   const htmlMsg =
-    `<b>New Subscription Request:</b><br><br>` +
-    `<b>Subscription ID:</b> ${ctx.session.subId || 'N/A'}<br>` +
-    `<b>User ID:</b> ${ctx.session.userId || 'N/A'}<br>` +
-    `<b>Subscription:</b> ${ctx.session.subPlan || 'N/A'}<br>` +
-    `<b>Slots:</b> ${ctx.session.subSlot || 'N/A'}<br>` +
-    `<b>Duration:</b> ${ctx.session.subDuration || 'N/A'} month(s)<br>` +
-    `<b>Category:</b> ${ctx.session.subCat || 'N/A'}<br>` +
-    `<b>Subcategory:</b> ${ctx.session.subSubCat || 'N/A'}<br>` +
-    `<b>Monthly Amount:</b> ₦${ctx.session.subAmount || 'N/A'}<br>` +
-    `<b>Login Email/WhatsApp:</b> ${ctx.session.subEmail || 'N/A'}<br>` +
-    `<b>Password:</b> ${ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A'}<br>` +
-    `<b>Time:</b> ${new Date().toISOString()}<br>`;
+    `<b>New Subscription Request:</b>\n\n` +
+    `<b>Subscription ID:</b> ${ctx.session.subId || 'N/A'}\n` +
+    `<b>User ID:</b> ${ctx.session.userId || 'N/A'}\n` +
+    `<b>Subscription:</b> ${ctx.session.subPlan || 'N/A'}\n` +
+    `<b>Slots:</b> ${ctx.session.subSlot || 'N/A'}\n` +
+    `<b>Duration:</b> ${ctx.session.subDuration || 'N/A'} month(s)\n` +
+    `<b>Category:</b> ${ctx.session.subCat || 'N/A'}\n` +
+    `<b>Subcategory:</b> ${ctx.session.subSubCat || 'N/A'}\n` +
+    `<b>Monthly Amount:</b> ₦${ctx.session.subAmount || 'N/A'}\n` +
+    `<b>Login Email/WhatsApp:</b> ${ctx.session.subEmail || 'N/A'}\n` +
+    `<b>Password:</b> ${ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A'}\n` +
+    `<b>Time:</b> ${new Date().toISOString()}\n`;
 
   const apiUrl = `https://api.telegram.org/bot${process.env.PREVIEW_BOT_TOKEN}/sendMessage`;
-  const chatIds = process.env.ADMIN_CHAT_IDS ? process.env.ADMIN_CHAT_IDS.split(',') : ['6632021617', '7193164208'];
+  const chatId = process.env.ADMIN_CHAT_ID || '6632021617';
   let notificationFailed = false;
 
-  for (const chatId of chatIds) {
+  try {
+    await fetchWithRetry(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: markdownMsg, parse_mode: 'MarkdownV2' }),
+    });
+  } catch (err) {
+    logger.error(`Failed to send MarkdownV2 to chat ID ${chatId}`, { error: err.message, message: markdownMsg });
     try {
       await fetchWithRetry(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: markdownMsg, parse_mode: 'MarkdownV2' }),
+        body: JSON.stringify({ chat_id: chatId, text: htmlMsg, parse_mode: 'HTML' }),
       });
-    } catch (err) {
-      console.error(`Failed to send MarkdownV2 to chat ID ${chatId}:`, err.message, 'Message:', markdownMsg);
-      try {
-        await fetchWithRetry(apiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text: htmlMsg, parse_mode: 'HTML' }),
-        });
-      } catch (htmlErr) {
-        console.error(`Failed to send HTML to chat ID ${chatId}:`, htmlErr.message, 'Message:', htmlMsg);
-        notificationFailed = true;
-      }
+    } catch (htmlErr) {
+      logger.error(`Failed to send HTML to chat ID ${chatId}`, { error: htmlErr.message, message: htmlMsg });
+      notificationFailed = true;
     }
   }
 
@@ -407,21 +606,22 @@ bot.action('CONFIRM_SUBSCRIPTION', async (ctx) => {
         userId: ctx.session.userId,
         subPlan: ctx.session.subPlan,
         subSlot: parseInt(ctx.session.subSlot),
-        subDuration: parseInt(ctx.session.subDuration),
-        subAmount: parseInt(ctx.session.subAmount),
+        subDuration: ctx.session.subDuration.toString(),
+        subAmount: ctx.session.subAmount.toString(),
         subEmail: ctx.session.subEmail,
-        subPassword: ctx.session.subPassword,
+        subPassword: ctx.session.subPassword || '',
         status: 'pending',
         subId: ctx.session.subId,
         subCategory: ctx.session.subCat,
         subSubCategory: ctx.session.subSubCat,
         subRemSlot: parseInt(ctx.session.subSlot),
-        crew: '',
+        crew: [],
+        shareType: ctx.session.shareType || 'login',
       },
     });
-    console.log(`Subscription ${ctx.session.subId} created for user ${ctx.session.userId}`);
+    logger.info(`Subscription ${ctx.session.subId} created for user ${ctx.session.userId}`);
   } catch (err) {
-    console.error('Failed to save subscription:', err.message);
+    logger.error('Failed to save subscription', { error: err.message, stack: err.stack });
     await ctx.reply('❌ Error saving subscription. Please try again.');
     clearListingSession(ctx);
     return showMainMenu(ctx);
@@ -429,26 +629,62 @@ bot.action('CONFIRM_SUBSCRIPTION', async (ctx) => {
 
   clearListingSession(ctx);
   if (!notificationFailed) {
-    await ctx.reply('✅ Subscription sent to Q Team for review! You’ll get an email update.');
+    await ctx.reply('✅ Subscription sent to Q!');
   } else {
-    await ctx.reply('✅ Subscription saved, but admin notification failed. The team will review soon.');
+    await ctx.reply('✅ Subscription saved, but listing notification failed.');
   }
-  return ctx.reply('What do you want to do next?', Markup.keyboard(['List Another Subscription', 'Go to Main Menu']).oneTime().resize());
+  return showMainMenu(ctx);
 });
 
 bot.action('CANCEL_SUBSCRIPTION', async (ctx) => {
   await ctx.answerCbQuery();
   clearListingSession(ctx);
-  await ctx.reply('❌ Subscription cancelled.');
+  await ctx.reply('❌ Listing cancelled.');
   return showMainMenu(ctx);
 });
 
+bot.action('WALLET', async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.reply('Wallet / Settings: Under construction!');
+});
+
+bot.action('SUPPORT', async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.reply('Support & FAQs: Under construction.');
+});
+
+bot.action('PROFILE', async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.reply('Profile / Settings: Under construction!');
+});
+
+bot.action('ADMIN_CITY', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (ctx.session.admin !== 'true') {
+    return ctx.reply('❌ Access restricted to admins only.');
+  }
+  return ctx.reply('Admin City: Under construction.');
+});
+
 if (process.env.RENDER === 'true') {
-  const app = express();
-  app.use(bot.webhookCallback('/'));
-  app.get('/', (req, res) => res.send('🤖 Q Bot is live on Render'));
-  const port = process.env.PORT || 3000;
-  app.listen(port, () => console.log(`✅ Bot running on port ${port}`));
+  app.get('/', (req, res) => {
+    res.send('🤖');
+  });
+  const port = parseInt(process.env.PORT) || 3000;
+  const webhookUrl = process.env.RENDER_EXTERNAL_URL || 'https://q-bot-01ay.onrender.com';
+  if (!webhookUrl.startsWith('https://')) {
+    logger.error('Webhook URL must be HTTPS', { webhookUrl });
+    process.exit(1);
+  }
+  app.listen(port, () => {
+    logger.info(`✅ Bot running on port ${port}`);
+    bot.telegram.setWebhook(webhookUrl).then(() => {
+      logger.info(`Webhook set to ${webhookUrl}`);
+    }).catch((err) => {
+      logger.error('Webhook set failed', { error: err.message });
+    });
+  });
 } else {
   bot.launch();
+  logger.info('✅ Bot running locally');
 }

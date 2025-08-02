@@ -1,4 +1,3 @@
-// src/utils/menu.js
 import { Markup } from 'telegraf';
 
 export function showMainMenu(ctx) {

@@ -23,11 +23,18 @@
   "license": "MIT",
   "dependencies": {
     "@prisma/client": "^5.0.0",
+    "@supabase/supabase-js": "^2.53.0",
+    "@telegraf/session": "^2.0.0-beta.7",
     "axios": "^1.6.8",
+    "body-parser": "^2.2.0",
+    "cron": "^4.3.2",
     "dotenv": "^16.3.1",
     "express": "^5.1.0",
     "node-fetch": "^3.3.2",
-    "telegraf": "^4.12.3"
+    "pg": "^8.16.3",
+    "telegraf": "^4.12.3",
+    "telegraf-postgres-session": "^1.0.5",
+    "winston": "^3.17.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.3",

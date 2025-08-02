@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,31 +8,58 @@ datasource db {
 }
 
 model users {
-  id         Int      @id @default(autoincrement())
-  userId     String   @unique
-  fullName   String?
-  email      String?
-  platform   String
-  admin      Boolean  @default(false)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id             Int           @id @default(autoincrement())
+  userId         String        @unique
+  fullName       String?
+  email          String        @unique
+  platform       String?
+  admin          Boolean       @default(false)
+  verified       Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime?
+  balance        balance?
+  subscriptions  subscription[]
+  leaveRequests  leaveRequest[]
 }
 
 model subscription {
-  id            Int      @id @default(autoincrement())
-  userId        String
-  subPlan       String
-  subSlot       Int
-  subRemSlot    Int
-  subDuration   Int
-  subAmount     Int
-  subEmail      String
-  subPassword   String
-  status        String   @default("pending")
-  subId         String   @unique
-  subCategory   String
-  subSubCategory String
-  crew          String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id             Int           @id @default(autoincrement())
+  userId         String
+  subPlan        String?
+  subSlot        Int           // Changed to Int
+  subDuration    String
+  subAmount      String
+  subEmail       String
+  subPassword    String
+  status         String        @default("pending")
+  subId          String        @unique
+  subCategory    String?
+  subSubCategory String?
+  shareType      String?       @default("login")
+  subRemSlot     Int?          // Changed to Int
+  crew           String[]      @default([])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  user           users         @relation(fields: [userId], references: [userId])
+  leaveRequests  leaveRequest[]
+}
+
+model balance {
+  userId         String        @id
+  balance        Int?          @default(50)
+  withdrawn      Int?          @default(0)
+  user           users         @relation(fields: [userId], references: [userId])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime?
+}
+
+model leaveRequest {
+  id             Int           @id @default(autoincrement())
+  userId         String
+  subId          String
+  status         String?       @default("pending")
+  createdAt      DateTime?     @default(now())
+  expiresAt      DateTime?
+  user           users         @relation(fields: [userId], references: [userId])
+  subscription   subscription   @relation(fields: [subId], references: [subId])
 }

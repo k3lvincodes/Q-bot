@@ -1,0 +1,312 @@
+import { Markup } from 'telegraf';
+import { prisma } from '../../db/client.js';
+import subscriptionPrices, { planIdMap } from '../../utils/subscription-prices.js';
+import { subcategoriesMap } from './add-subscription.js';
+import axios from 'axios';
+import logger from '../../utils/logger.js';
+
+// Define categories from subcategoriesMap for consistency
+const categories = Object.keys(subcategoriesMap).map((name) => ({
+  name,
+  subcategories: subcategoriesMap[name],
+}));
+
+export async function browseSubscriptionsWorkflow(ctx) {
+  try {
+    ctx.session.step = 'browseSubscriptions';
+    ctx.session.browsePage = 0;
+    ctx.session.browseSort = 'newest';
+    return ctx.reply(
+      'Browse and join subscriptions you like.\n\nSelect a category:',
+      Markup.inlineKeyboard(
+        categories.map((cat) => [
+          Markup.button.callback(cat.name, `BROWSE_CAT_${cat.name.replace(/ /g, '_')}`),
+        ])
+      )
+    );
+  } catch (err) {
+    logger.error('Error in browseSubscriptionsWorkflow', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Error starting browse workflow. Please try again.');
+  }
+}
+
+export async function handleBrowseCategorySelection(ctx, category) {
+  try {
+    const cat = categories.find((c) => c.name === category);
+    if (!cat) {
+      logger.warn('Invalid category selected', { category });
+      return ctx.reply('❌ Invalid category.', Markup.inlineKeyboard([[Markup.button.callback('Back', 'BROWSE')]]));
+    }
+    ctx.session.browseCategory = category;
+    return ctx.reply(
+      `Select a subcategory for ${category}:`,
+      Markup.inlineKeyboard([
+        ...cat.subcategories.map((sub) => [
+          Markup.button.callback(sub, `BROWSE_SUBCAT_${sub.replace(/ /g, '_')}`),
+        ]),
+        [Markup.button.callback('Back', 'BROWSE')],
+      ])
+    );
+  } catch (err) {
+    logger.error('Error in handleBrowseCategorySelection', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Error selecting category. Please try again.');
+  }
+}
+
+export async function handleBrowseSubcategorySelection(ctx, subcategory) {
+  try {
+    ctx.session.browseSubcategory = subcategory;
+    ctx.session.browsePage = ctx.session.browsePage || 0;
+    return await showSubscriptions(ctx);
+  } catch (err) {
+    logger.error('Error in handleBrowseSubcategorySelection', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Error selecting subcategory. Please try again.');
+  }
+}
+
+async function showSubscriptions(ctx) {
+  try {
+    const { browseSubcategory, browsePage, browseSort } = ctx.session;
+    const perPage = 10;
+    let orderBy = { createdAt: 'desc' }; // Default: Newest
+    if (browseSort === 'oldest') orderBy = { createdAt: 'asc' };
+    if (browseSort === 'verified') orderBy = { createdAt: 'desc' };
+
+    const where = {
+      subSubCategory: browseSubcategory,
+      status: 'live',
+      subRemSlot: { gt: 0 }, // Valid for INTEGER
+    };
+
+    if (browseSort === 'verified') {
+      where.user = { verified: true };
+    }
+
+    const subscriptions = await prisma.subscription.findMany({
+      where,
+      orderBy,
+      skip: browsePage * perPage,
+      take: perPage,
+      include: { user: true },
+    });
+
+    const total = await prisma.subscription.count({ where });
+    const totalPages = Math.ceil(total / perPage);
+
+    if (subscriptions.length === 0) {
+      return ctx.reply(
+        `No available subscriptions for ${browseSubcategory}.`,
+        Markup.inlineKeyboard([[Markup.button.callback('Back', 'BROWSE')]])
+      );
+    }
+
+    const subList = subscriptions
+      .map((record) => {
+        return `Owner: ${record.user?.fullName || 'Unknown User'}\n` +
+               `Plan: ${record.subPlan}\n` +
+               `Duration: ${record.subDuration} month(s)\n` +
+               `Total Slots: ${record.subSlot}\n` +
+               `Available Slots: ${record.subRemSlot}\n` +
+               `Amount: ₦${record.subAmount}/month\n` +
+               `Subscription ID: ${record.subId}\n`;
+      })
+      .join('\n\n');
+
+    const buttons = subscriptions.map((sub) => [
+      Markup.button.callback('Select', `SELECT_SUB_${sub.subId}`),
+    ]);
+    const navButtons = [];
+    if (browsePage > 0) navButtons.push(Markup.button.callback('Previous', 'BROWSE_PREV'));
+    if (browsePage < totalPages - 1) navButtons.push(Markup.button.callback('Next', 'BROWSE_NEXT'));
+    const sortButtons = [
+      Markup.button.callback('Newest', 'SORT_NEWEST'),
+      Markup.button.callback('Oldest', 'SORT_OLDEST'),
+      Markup.button.callback('Verified Listers', 'SORT_VERIFIED'),
+    ];
+
+    await ctx.deleteMessage().catch(() => {}); // Prevent ERR_HTTP_HEADERS_SENT
+    return ctx.reply(
+      `Subscriptions for ${browseSubcategory}:\n\n${subList}`,
+      Markup.inlineKeyboard([
+        ...buttons,
+        navButtons.length > 0 ? navButtons : [],
+        sortButtons,
+        [Markup.button.callback('Back', 'BROWSE')],
+      ])
+    );
+  } catch (err) {
+    logger.error('Error in showSubscriptions', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Error fetching subscriptions. Please try again.');
+  }
+}
+
+export async function handleSubscriptionSelection(ctx, subId) {
+  try {
+    const sub = await prisma.subscription.findUnique({
+      where: { subId },
+      include: { user: true },
+    });
+    if (!sub || sub.status !== 'live' || sub.subRemSlot <= 0) {
+      return ctx.reply(
+        '❌ Subscription unavailable.',
+        Markup.inlineKeyboard([[Markup.button.callback('Back', 'BROWSE')]])
+      );
+    }
+
+    ctx.session.selectedSubId = subId;
+    const details = `Subscription Details:\n\n` +
+                    `Owner: ${sub.user?.fullName || 'Unknown User'}\n` +
+                    `Plan: ${sub.subPlan}\n` +
+                    `Duration: ${sub.subDuration} month(s)\n` +
+                    `Available Slots: ${sub.subRemSlot}\n` +
+                    `Amount: ₦${sub.subAmount}/month\n` +
+                    `Subscription ID: ${subId}\n`;
+
+    return ctx.reply(
+      details + '\nWould you like to:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Continue to Payment', 'PAY_SUB')],
+        [Markup.button.callback('Back', 'BROWSE')],
+      ])
+    );
+  } catch (err) {
+    logger.error('Error in handleSubscriptionSelection', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Error selecting subscription. Please try again.');
+  }
+}
+
+export async function initiatePayment(ctx) {
+  try {
+    const sub = await prisma.subscription.findUnique({
+      where: { subId: ctx.session.selectedSubId },
+    });
+    const user = await prisma.users.findUnique({
+      where: { userId: ctx.session.userId },
+    });
+    if (!sub || !user) {
+      logger.warn('Invalid subscription or user for payment', {
+        subId: ctx.session.selectedSubId,
+        userId: ctx.session.userId,
+      });
+      return ctx.reply('❌ Error initiating payment.');
+    }
+
+    const response = await axios.post(
+      'https://quorix-paystack-backend.vercel.app/api/transfer/initiate-transfer',
+      {
+        amount: parseInt(sub.subAmount) + 300, // Add transfer fee
+        email: user.email,
+      }
+    );
+    ctx.session.authUrl = response.data?.response?.authorization_url || '';
+    ctx.session.transferReference = response.data?.response?.reference || '';
+    if (!ctx.session.authUrl) {
+      throw new Error('No authorization URL received from Paystack.');
+    }
+
+    return ctx.reply(
+      `Click the link to complete your bank transfer:\n\n${ctx.session.authUrl}`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Completed', 'VERIFY_PAYMENT')],
+        [Markup.button.callback('Cancel', 'CANCEL_PAYMENT')],
+      ])
+    );
+  } catch (err) {
+    logger.error('Error in initiatePayment', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Failed to initiate payment. Please try again.');
+  }
+}
+
+export async function verifyPayment(ctx) {
+  try {
+    const { transferReference, selectedSubId } = ctx.session;
+    if (!transferReference || !selectedSubId) {
+      logger.warn('Missing transfer reference or subscription ID', {
+        transferReference,
+        selectedSubId,
+      });
+      return ctx.reply('❌ Invalid payment verification request.');
+    }
+
+    let response = await axios.get(
+      `https://quorix-paystack-backend.vercel.app/api/transfer/verify-transfer?reference=${transferReference}`
+    );
+    let transferStatus = response.data?.response?.status || '';
+    if (!transferStatus) {
+      throw new Error('No status received from Paystack.');
+    }
+
+    response = await axios.get(
+      'https://quorix-paystack-backend.vercel.app/api/transfer/verify-transfer',
+      { params: { transferDetails: transferStatus } }
+    );
+    transferStatus = response.data?.response?.status || '';
+
+    if (transferStatus === 'pending' || transferStatus === 'failed') {
+      return ctx.reply(
+        `We haven’t received your payment yet. Kindly complete the transfer and try again.\n\n${ctx.session.authUrl}`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('Completed', 'VERIFY_PAYMENT')],
+          [Markup.button.callback('Cancel', 'CANCEL_PAYMENT')],
+        ])
+      );
+    }
+
+    if (transferStatus === 'success') {
+      const sub = await prisma.subscription.findUnique({
+        where: { subId: selectedSubId },
+      });
+      const user = await prisma.users.findUnique({
+        where: { userId: ctx.session.userId },
+      });
+      if (!sub || !user) {
+        throw new Error('Subscription or user not found.');
+      }
+
+      await prisma.subscription.update({
+        where: { subId: selectedSubId },
+        data: {
+          crew: { push: user.email },
+          subRemSlot: { decrement: 1 },
+        },
+      });
+
+      await prisma.balance.upsert({
+        where: { userId: sub.userId },
+        update: { balance: { increment: parseInt(sub.subAmount) } },
+        create: { userId: sub.userId, balance: parseInt(sub.subAmount) },
+      });
+
+      ctx.session.step = null;
+      ctx.session.authUrl = null;
+      ctx.session.transferReference = null;
+      ctx.session.selectedSubId = null;
+
+      return ctx.reply(
+        '✅ Payment successful! You have joined the subscription.',
+        Markup.inlineKeyboard([[Markup.button.callback('Back to Menu', 'MAIN_MENU')]])
+      );
+    }
+
+    throw new Error(`Unexpected transfer status: ${transferStatus}`);
+  } catch (err) {
+    logger.error('Error in verifyPayment', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Payment verification failed. Please try again.');
+  }
+}
+
+export async function cancelPayment(ctx) {
+  try {
+    ctx.session.step = null;
+    ctx.session.authUrl = null;
+    ctx.session.transferReference = null;
+    ctx.session.selectedSubId = null;
+    return ctx.reply(
+      'Payment cancelled.',
+      Markup.inlineKeyboard([[Markup.button.callback('Back to Menu', 'MAIN_MENU')]])
+    );
+  } catch (err) {
+    logger.error('Error in cancelPayment', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Error cancelling payment. Please try again.');
+  }
+}
