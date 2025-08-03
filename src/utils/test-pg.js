@@ -1,7 +1,10 @@
 import { Pool } from 'pg';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:LiphaXtYvjDPAGGwbiAERanGxdWutpNR@shuttle.proxy.rlwy.net:43528/railway',
+  connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
