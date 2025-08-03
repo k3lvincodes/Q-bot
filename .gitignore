@@ -3,6 +3,7 @@ node_modules
 .env
 
 /src/generated/prisma
+/logs
 
 curl.exe q-bot.txt
 folder-structure.txt
