@@ -18,11 +18,12 @@ export async function browseSubscriptionsWorkflow(ctx) {
     ctx.session.browseSort = 'newest';
     return ctx.reply(
       'Browse and join subscriptions you like.\n\nSelect a category:',
-      Markup.inlineKeyboard(
-        categories.map((cat) => [
+      Markup.inlineKeyboard([
+        ...categories.map((cat) => [
           Markup.button.callback(cat.name, `BROWSE_CAT_${cat.name.replace(/ /g, '_')}`),
-        ])
-      )
+        ]),
+        [Markup.button.callback('Return to Main Menu', 'RETURN_TO_MAIN_MENU')],
+      ])
     );
   } catch (err) {
     logger.error('Error in browseSubscriptionsWorkflow', { error: err.message, stack: err.stack });
@@ -284,7 +285,7 @@ export async function verifyPayment(ctx) {
 
       return ctx.reply(
         '✅ Payment successful! You have joined the subscription.',
-        Markup.inlineKeyboard([[Markup.button.callback('Back to Menu', 'MAIN_MENU')]])
+        Markup.inlineKeyboard([[Markup.button.callback('Back to Menu', 'RETURN_TO_MAIN_MENU')]])
       );
     }
 
@@ -303,7 +304,7 @@ export async function cancelPayment(ctx) {
     ctx.session.selectedSubId = null;
     return ctx.reply(
       'Payment cancelled.',
-      Markup.inlineKeyboard([[Markup.button.callback('Back to Menu', 'MAIN_MENU')]])
+      Markup.inlineKeyboard([[Markup.button.callback('Back to Menu', 'RETURN_TO_MAIN_MENU')]])
     );
   } catch (err) {
     logger.error('Error in cancelPayment', { error: err.message, stack: err.stack });

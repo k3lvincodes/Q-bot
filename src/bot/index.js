@@ -79,6 +79,29 @@ app.use((err, req, res, next) => {
 bot.use(safeSession());
 startCronJobs();
 
+// Function to generate a short subscription ID (e.g., Q_D00ZG)
+async function generateShortSubId() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let subId;
+  let isUnique = false;
+  const maxAttempts = 10;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    subId = 'Q_' + Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    const existing = await prisma.subscription.findUnique({ where: { subId } });
+    if (!existing) {
+      isUnique = true;
+      break;
+    }
+  }
+
+  if (!isUnique) {
+    throw new Error('Failed to generate unique subscription ID after maximum attempts');
+  }
+
+  return subId;
+}
+
 // Inactivity middleware
 bot.use(async (ctx, next) => {
   const now = Date.now();
@@ -111,7 +134,9 @@ function escapeMarkdownV2(text) {
   if (!text) return 'N/A';
   return text
     .toString()
-    .replace(/([_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\])/g, '\\$1');
+    .replace(/[_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\]/g, '\\$1')
+    .replace(/([^\w\s\/])/g, '\\$1')
+    .replace(/(\\\\[_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\])/g, '$1');
 }
 
 async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
@@ -180,7 +205,11 @@ async function ensureRegistered(ctx, callback) {
   ctx.session.step = 'collectFullName';
   logger.info('Initialized new user session for action', { telegramId, session: { ...ctx.session } });
   await ctx.reply('Welcome to Q! Please enter your full name to register:');
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in ensureRegistered', { error: err.message });
+  }
 }
 
 // Handle /start to reset session and initiate registration
@@ -291,51 +320,6 @@ bot.on('text', async (ctx, next) => {
     }
   }
 
-  // Check registration status before handling menu options
-  if (!ctx.session.step && !ctx.session.email) {
-    const user = await prisma.users.findUnique({ where: { userId: telegramId } });
-    if (user) {
-      ctx.session.persistentUser = 'yes';
-      ctx.session.email = user.email;
-      ctx.session.firstName = user.fullName?.split(' ')[0] || '';
-      ctx.session.admin = user.admin ? 'true' : 'false';
-      logger.info('User found in database', { telegramId, email: user.email });
-      await ctx.reply(`Welcome back to Q, ${ctx.session.firstName}!`);
-      return showMainMenu(ctx);
-    } else {
-      ctx.session.persistentUser = 'no';
-      ctx.session.platform = 'telegram';
-      ctx.session.step = 'collectFullName';
-      logger.info('Initialized new user session', { telegramId, session: { ...ctx.session } });
-      await ctx.reply(`Welcome to Q! Please enter your full name:`);
-      return;
-    }
-  }
-
-  // Handle menu options only for registered users
-  if (ctx.session.persistentUser === 'yes' && ['Browse Subscriptions', 'My Subscriptions', 'Add My Subscription', 'Wallet / Payments', 'Support & FAQs', 'Profile / Settings', 'Admin City (Admins only)'].includes(text)) {
-    clearListingSession(ctx);
-    switch (text) {
-      case 'Browse Subscriptions':
-        return browseSubscriptionsWorkflow(ctx);
-      case 'My Subscriptions':
-        return mySubscriptionsWorkflow(ctx);
-      case 'Add My Subscription':
-        return addSubscriptionWorkflow(ctx);
-      case 'Wallet / Payments':
-        return ctx.reply('Wallet / Payments: Under construction.');
-      case 'Support & FAQs':
-        return ctx.reply('Support & FAQs: Under construction.');
-      case 'Profile / Settings':
-        return ctx.reply('Profile / Settings: Under construction.');
-      case 'Admin City (Admins only)':
-        if (ctx.session.admin !== 'true') {
-          return ctx.reply('❌ Access restricted to admins only.');
-        }
-        return ctx.reply('Admin City: Under construction.');
-    }
-  }
-
   // Handle subscription-related steps
   if (ctx.session.step === 'enterSlot') {
     const slot = parseInt(text.trim());
@@ -393,6 +377,44 @@ bot.on('text', async (ctx, next) => {
     );
   }
 
+  if (ctx.session.step === 'selectDuration') {
+    const duration = parseInt(text.trim());
+    if (isNaN(duration) || duration < 1 || duration > 12) {
+      logger.warn('Invalid duration input', { telegramId, input: text });
+      return ctx.reply('❌ Enter a valid duration (1–12). Try again:');
+    }
+    ctx.session.subDuration = duration;
+    ctx.session.subId = await generateShortSubId(); // Generate short subId
+    ctx.session.step = 'confirmSubscription';
+    logger.info('Set duration and subId', { telegramId, subDuration: duration, subId: ctx.session.subId });
+
+    const safe = (value) => (value ? value.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/&/g, '&amp;') : 'N/A');
+    const htmlMsg =
+      `<b>Confirm Subscription:</b>\n\n` +
+      `<b>Subscription:</b> ${safe(ctx.session.subPlan)}\n` +
+      `<b>Slots:</b> ${safe(ctx.session.subSlot)}\n` +
+      `<b>Duration:</b> ${safe(ctx.session.subDuration)} month(s)\n` +
+      `<b>Category:</b> ${safe(ctx.session.subCat)}\n` +
+      `<b>Subcategory:</b> ${safe(ctx.session.subSubCat)}\n` +
+      `<b>Monthly Amount:</b> ₦${safe(ctx.session.subAmount)}\n` +
+      `<b>Share Type:</b> ${safe(ctx.session.shareType)}\n` +
+      `<b>Login Email/WhatsApp:</b> ${safe(ctx.session.subEmail)}\n` +
+      `<b>Password:</b> ${safe(ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A')}\n`;
+
+    return ctx.reply(
+      htmlMsg,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.callback('Confirm', 'CONFIRM_SUBSCRIPTION')],
+            [Markup.button.callback('Cancel', 'CANCEL_SUBSCRIPTION')],
+          ],
+        },
+      }
+    );
+  }
+
   if (ctx.session.step === 'updateSlots') {
     return handleUpdateSlots(ctx, text);
   }
@@ -401,10 +423,60 @@ bot.on('text', async (ctx, next) => {
     return handleUpdateDuration(ctx, text);
   }
 
+  // Check registration status before handling menu options
+  if (!ctx.session.step && !ctx.session.email) {
+    const user = await prisma.users.findUnique({ where: { userId: telegramId } });
+    if (user) {
+      ctx.session.persistentUser = 'yes';
+      ctx.session.email = user.email;
+      ctx.session.firstName = user.fullName?.split(' ')[0] || '';
+      ctx.session.admin = user.admin ? 'true' : 'false';
+      logger.info('User found in database', { telegramId, email: user.email });
+      await ctx.reply(`Welcome back to Q, ${ctx.session.firstName}!`);
+      return showMainMenu(ctx);
+    } else {
+      ctx.session.persistentUser = 'no';
+      ctx.session.platform = 'telegram';
+      ctx.session.step = 'collectFullName';
+      logger.info('Initialized new user session', { telegramId, session: { ...ctx.session } });
+      await ctx.reply(`Welcome to Q! Please enter your full name:`);
+      return;
+    }
+  }
+
+  // Handle menu options only for registered users
+  if (ctx.session.persistentUser === 'yes' && ['Browse Subscriptions', 'My Subscriptions', 'Add My Subscription', 'Wallet / Payments', 'Support & FAQs', 'Profile / Settings', 'Admin City (Admins only)'].includes(text)) {
+    clearListingSession(ctx);
+    switch (text) {
+      case 'Browse Subscriptions':
+        return browseSubscriptionsWorkflow(ctx);
+      case 'My Subscriptions':
+        return mySubscriptionsWorkflow(ctx);
+      case 'Add My Subscription':
+        return addSubscriptionWorkflow(ctx);
+      case 'Wallet / Payments':
+        return ctx.reply('Wallet / Payments: Under construction.');
+      case 'Support & FAQs':
+        return ctx.reply('Support & FAQs: Under construction.');
+      case 'Profile / Settings':
+        return ctx.reply('Profile / Settings: Under construction.');
+      case 'Admin City (Admins only)':
+        if (ctx.session.admin !== 'true') {
+          return ctx.reply('❌ Access restricted to admins only.');
+        }
+        return ctx.reply('Admin City: Under construction.');
+    }
+  }
+
   if (next) return next();
 });
 
 bot.action('BROWSE', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in BROWSE', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     clearListingSession(ctx);
     return browseSubscriptionsWorkflow(ctx);
@@ -412,135 +484,229 @@ bot.action('BROWSE', async (ctx) => {
 });
 
 bot.action(/^BROWSE_CAT_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in BROWSE_CAT', { error: err.message });
+  }
   const category = ctx.match[1].replace(/_/g, ' ');
   return handleBrowseCategorySelection(ctx, category);
 });
 
 bot.action(/^BROWSE_SUBCAT_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in BROWSE_SUBCAT', { error: err.message });
+  }
   const subcategory = ctx.match[1].replace(/_/g, ' ');
   return handleBrowseSubcategorySelection(ctx, subcategory);
 });
 
 bot.action('BROWSE_BACK', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in BROWSE_BACK', { error: err.message });
+  }
   return browseSubscriptionsWorkflow(ctx);
 });
 
 bot.action('BROWSE_PREV', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in BROWSE_PREV', { error: err.message });
+  }
   ctx.session.browsePage = Math.max(0, ctx.session.browsePage - 1);
   return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
 });
 
 bot.action('BROWSE_NEXT', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in BROWSE_NEXT', { error: err.message });
+  }
   ctx.session.browsePage += 1;
   return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
 });
 
 bot.action('SORT_NEWEST', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SORT_NEWEST', { error: err.message });
+  }
   ctx.session.browseSort = 'newest';
   ctx.session.browsePage = 0;
   return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
 });
 
 bot.action('SORT_OLDEST', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SORT_OLDEST', { error: err.message });
+  }
   ctx.session.browseSort = 'oldest';
   ctx.session.browsePage = 0;
   return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
 });
 
 bot.action('SORT_VERIFIED', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SORT_VERIFIED', { error: err.message });
+  }
   ctx.session.browseSort = 'verified';
   ctx.session.browsePage = 0;
   return handleBrowseSubcategorySelection(ctx, ctx.session.browseSubcategory);
 });
 
 bot.action(/^SELECT_SUB_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SELECT_SUB', { error: err.message });
+  }
   const subId = ctx.match[1];
   return handleSubscriptionSelection(ctx, subId);
 });
 
 bot.action('PAY_SUB', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in PAY_SUB', { error: err.message });
+  }
   return initiatePayment(ctx);
 });
 
 bot.action('VERIFY_PAYMENT', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in VERIFY_PAYMENT', { error: err.message });
+  }
   return verifyPayment(ctx);
 });
 
 bot.action('CANCEL_PAYMENT', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in CANCEL_PAYMENT', { error: err.message });
+  }
   return cancelPayment(ctx);
 });
 
 bot.action('BROWSE_SUBS', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in BROWSE_SUBS', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     return browseSubscriptionsWorkflow(ctx);
   });
 });
 
 bot.action('MY_SUBS', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in MY_SUBS', { error: err.message });
+  }
   clearListingSession(ctx);
   return mySubscriptionsWorkflow(ctx);
 });
 
 bot.action('LISTED_SUBS', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in LISTED_SUBS', { error: err.message });
+  }
   return showListedSubscriptions(ctx);
 });
 
 bot.action('JOINED_SUBS', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in JOINED_SUBS', { error: err.message });
+  }
   return showJoinedSubscriptions(ctx);
 });
 
 bot.action(/^UNLIST_SUB_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in UNLIST_SUB', { error: err.message });
+  }
   const subId = ctx.match[1];
   return unlistSubscription(ctx, subId);
 });
 
 bot.action(/^UPDATE_SUB_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in UPDATE_SUB', { error: err.message });
+  }
   const subId = ctx.match[1];
   return updateSubscription(ctx, subId);
 });
 
 bot.action(/^RENEW_SUB_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in RENEW_SUB', { error: err.message });
+  }
   const subId = ctx.match[1];
   return renewSubscription(ctx, subId);
 });
 
 bot.action(/^LEAVE_SUB_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in LEAVE_SUB', { error: err.message });
+  }
   const subId = ctx.match[1];
   return leaveSubscription(ctx, subId);
 });
 
 bot.action(/^CONFIRM_LEAVE_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in CONFIRM_LEAVE', { error: err.message });
+  }
   const subId = ctx.match[1];
   return leaveSubscription(ctx, subId, true);
 });
 
 bot.action(/^CANCEL_LEAVE_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in CANCEL_LEAVE', { error: err.message });
+  }
   const subId = ctx.match[1];
   return cancelLeaveRequest(ctx, subId);
 });
 
 bot.action('ADD_SUB', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in ADD_SUB', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     clearListingSession(ctx);
     return addSubscriptionWorkflow(ctx);
@@ -548,6 +714,11 @@ bot.action('ADD_SUB', async (ctx) => {
 });
 
 bot.action(/^CATEGORY_(.+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in CATEGORY', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     const category = ctx.match[1].replace(/_/g, ' ');
     return handleSubCategorySelection(ctx, category);
@@ -555,6 +726,11 @@ bot.action(/^CATEGORY_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^SUBCATEGORY_(.+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SUBCATEGORY', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     const sub = ctx.match[1].replace(/_/g, ' ');
     return handlePlanSelection(ctx, sub);
@@ -562,6 +738,11 @@ bot.action(/^SUBCATEGORY_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^PLAN_ID_(.+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in PLAN_ID', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     const planId = ctx.match[1];
     const plan = Object.keys(planIdMap).find((p) => planIdMap[p] === planId);
@@ -584,6 +765,11 @@ bot.action(/^PLAN_ID_(.+)$/, async (ctx) => {
 });
 
 bot.action('SHARE_LOGIN', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SHARE_LOGIN', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     ctx.session.shareType = 'login';
     ctx.session.step = 'enterEmail';
@@ -593,6 +779,11 @@ bot.action('SHARE_LOGIN', async (ctx) => {
 });
 
 bot.action('SHARE_OTP', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SHARE_OTP', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
     ctx.session.shareType = 'otp';
     ctx.session.step = 'enterWhatsApp';
@@ -601,49 +792,102 @@ bot.action('SHARE_OTP', async (ctx) => {
   });
 });
 
+bot.action(/^DURATION_(\d+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in DURATION', { error: err.message });
+  }
+  await ensureRegistered(ctx, async () => {
+    const duration = parseInt(ctx.match[1]);
+    if (duration < 1 || duration > 12) {
+      logger.warn('Invalid duration selected via button', { telegramId: ctx.from.id, duration });
+      return ctx.reply('❌ Invalid duration. Please select a duration between 1 and 12 months.');
+    }
+    ctx.session.subDuration = duration;
+    ctx.session.subId = await generateShortSubId(); // Generate short subId
+    ctx.session.step = 'confirmSubscription';
+    logger.info('Set duration and subId via button', { telegramId: ctx.from.id, subDuration: duration, subId: ctx.session.subId });
+
+    const safe = (value) => (value ? value.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/&/g, '&amp;') : 'N/A');
+    const htmlMsg =
+      `<b>Confirm Subscription:</b>\n\n` +
+      `<b>Subscription:</b> ${safe(ctx.session.subPlan)}\n` +
+      `<b>Slots:</b> ${safe(ctx.session.subSlot)}\n` +
+      `<b>Duration:</b> ${safe(ctx.session.subDuration)} month(s)\n` +
+      `<b>Category:</b> ${safe(ctx.session.subCat)}\n` +
+      `<b>Subcategory:</b> ${safe(ctx.session.subSubCat)}\n` +
+      `<b>Monthly Amount:</b> ₦${safe(ctx.session.subAmount)}\n` +
+      `<b>Share Type:</b> ${safe(ctx.session.shareType)}\n` +
+      `<b>Login Email/WhatsApp:</b> ${safe(ctx.session.subEmail)}\n` +
+      `<b>Password:</b> ${safe(ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A')}\n`;
+
+    return ctx.reply(
+      htmlMsg,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.callback('Confirm', 'CONFIRM_SUBSCRIPTION')],
+            [Markup.button.callback('Cancel', 'CANCEL_SUBSCRIPTION')],
+          ],
+        },
+      }
+    );
+  });
+});
+
 bot.action('RETURN_TO_CATEGORY', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in RETURN_TO_CATEGORY', { error: err.message });
+  }
   return addSubscriptionWorkflow(ctx);
 });
 
 bot.action('RETURN_TO_MAIN_MENU', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in RETURN_TO_MAIN_MENU', { error: err.message });
+  }
+  clearListingSession(ctx);
+  return showMainMenu(ctx);
+});
+
+bot.action('MAIN_MENU', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in MAIN_MENU', { error: err.message });
+  }
   clearListingSession(ctx);
   return showMainMenu(ctx);
 });
 
 bot.action('CONFIRM_SUBSCRIPTION', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in CONFIRM_SUBSCRIPTION', { error: err.message });
+  }
   await ensureRegistered(ctx, async () => {
-    const escape = escapeMarkdownV2;
-    const safe = (value) => escape(value?.toString());
-
-    const markdownMsg =
-      `*New Subscription Request:*\n\n` +
-      `**Subscription ID:** ${safe(ctx.session.subId)}\n` +
-      `**User ID:** ${safe(ctx.session.userId)}\n` +
-      `**Subscription:** ${safe(ctx.session.subPlan)}\n` +
-      `**Slots:** ${safe(ctx.session.subSlot)}\n` +
-      `**Duration:** ${safe(ctx.session.subDuration)}\n` +
-      `**Category:** ${safe(ctx.session.subCat)}\n` +
-      `**Subcategory:** ${safe(ctx.session.subSubCat)}\n` +
-      `**Monthly Amount:** ₦${safe(ctx.session.subAmount)}\n` +
-      `**Login Email/WhatsApp:** ${safe(ctx.session.subEmail)}\n` +
-      `**Password:** ${safe(ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A')}\n` +
-      `**Time:** ${safe(new Date().toISOString())}\n`;
+    const safe = (value) => (value ? value.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/&/g, '&amp;') : 'N/A');
 
     const htmlMsg =
       `<b>New Subscription Request:</b>\n\n` +
-      `<b>Subscription ID:</b> ${ctx.session.subId || 'N/A'}\n` +
-      `<b>User ID:</b> ${ctx.session.userId || 'N/A'}\n` +
-      `<b>Subscription:</b> ${ctx.session.subPlan || 'N/A'}\n` +
-      `<b>Slots:</b> ${ctx.session.subSlot || 'N/A'}\n` +
-      `<b>Duration:</b> ${ctx.session.subDuration || 'N/A'} month(s)\n` +
-      `<b>Category:</b> ${ctx.session.subCat || 'N/A'}\n` +
-      `<b>Subcategory:</b> ${ctx.session.subSubCat || 'N/A'}\n` +
-      `<b>Monthly Amount:</b> ₦${ctx.session.subAmount || 'N/A'}\n` +
-      `<b>Login Email/WhatsApp:</b> ${ctx.session.subEmail || 'N/A'}\n` +
-      `<b>Password:</b> ${ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A'}\n` +
-      `<b>Time:</b> ${new Date().toISOString()}\n`;
+      `<b>Subscription ID:</b> ${safe(ctx.session.subId)}\n` +
+      `<b>User ID:</b> ${safe(ctx.session.userId)}\n` +
+      `<b>Subscription:</b> ${safe(ctx.session.subPlan)}\n` +
+      `<b>Slots:</b> ${safe(ctx.session.subSlot)}\n` +
+      `<b>Duration:</b> ${safe(ctx.session.subDuration)} month(s)\n` +
+      `<b>Category:</b> ${safe(ctx.session.subCat)}\n` +
+      `<b>Subcategory:</b> ${safe(ctx.session.subSubCat)}\n` +
+      `<b>Monthly Amount:</b> ₦${safe(ctx.session.subAmount)}\n` +
+      `<b>Login Email/WhatsApp:</b> ${safe(ctx.session.subEmail)}\n` +
+      `<b>Password:</b> ${safe(ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A')}\n` +
+      `<b>Time:</b> ${safe(new Date().toISOString())}\n`;
 
     const apiUrl = `https://api.telegram.org/bot${process.env.PREVIEW_BOT_TOKEN}/sendMessage`;
     const chatId = process.env.ADMIN_CHAT_ID || '6632021617';
@@ -653,20 +897,11 @@ bot.action('CONFIRM_SUBSCRIPTION', async (ctx) => {
       await fetchWithRetry(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: markdownMsg, parse_mode: 'MarkdownV2' }),
+        body: JSON.stringify({ chat_id: chatId, text: htmlMsg, parse_mode: 'HTML' }),
       });
     } catch (err) {
-      logger.error(`Failed to send MarkdownV2 to chat ID ${chatId}`, { error: err.message, message: markdownMsg });
-      try {
-        await fetchWithRetry(apiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text: htmlMsg, parse_mode: 'HTML' }),
-        });
-      } catch (htmlErr) {
-        logger.error(`Failed to send HTML to chat ID ${chatId}`, { error: htmlErr.message, message: htmlMsg });
-        notificationFailed = true;
-      }
+      logger.error(`Failed to send HTML to chat ID ${chatId}`, { error: err.message, message: htmlMsg });
+      notificationFailed = true;
     }
 
     try {
@@ -707,29 +942,49 @@ bot.action('CONFIRM_SUBSCRIPTION', async (ctx) => {
 });
 
 bot.action('CANCEL_SUBSCRIPTION', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in CANCEL_SUBSCRIPTION', { error: err.message });
+  }
   clearListingSession(ctx);
   await ctx.reply('❌ Listing cancelled.');
   return showMainMenu(ctx);
 });
 
 bot.action('WALLET', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in WALLET', { error: err.message });
+  }
   return ctx.reply('Wallet / Settings: Under construction!');
 });
 
 bot.action('SUPPORT', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in SUPPORT', { error: err.message });
+  }
   return ctx.reply('Support & FAQs: Under construction!');
 });
 
 bot.action('PROFILE', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in PROFILE', { error: err.message });
+  }
   return ctx.reply('Profile / Settings: Under construction!');
 });
 
 bot.action('ADMIN_CITY', async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.error('Failed to answer callback query in ADMIN_CITY', { error: err.message });
+  }
   if (ctx.session.admin !== 'true') {
     return ctx.reply('❌ Access restricted to admins only.');
   }
