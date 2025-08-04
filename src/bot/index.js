@@ -996,7 +996,7 @@ if (process.env.RENDER === 'true') {
     res.send('🤖');
   });
   const port = parseInt(process.env.PORT) || 3000;
-  const webhookUrl = process.env.RENDER_EXTERNAL_URL || 'https://q-bot-01ay.onrender.com';
+  const webhookUrl = process.env.RENDER_EXTERNAL_URL;
   if (!webhookUrl.startsWith('https://')) {
     logger.error('Webhook URL must be HTTPS', { webhookUrl });
     process.exit(1);
