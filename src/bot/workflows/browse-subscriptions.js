@@ -1,9 +1,8 @@
 import { Markup } from 'telegraf';
 import { prisma } from '../../db/client.js';
-import subscriptionPrices, { planIdMap } from '../../utils/subscription-prices.js';
 import { subcategoriesMap } from './add-subscription.js';
-import axios from 'axios';
 import logger from '../../utils/logger.js';
+import { fetchWithRetry } from '../index.js';
 
 // Define categories from subcategoriesMap for consistency
 const categories = Object.keys(subcategoriesMap).map((name) => ({
@@ -192,19 +191,38 @@ export async function initiatePayment(ctx) {
       return ctx.reply('❌ Error initiating payment.');
     }
 
-    const response = await axios.post(
-      'https://quorix-paystack-backend.vercel.app/api/transfer/initiate-transfer',
-      {
-        amount: parseInt(sub.subAmount) + 300, // Add transfer fee
-        email: user.email,
-      }
-    );
-    ctx.session.authUrl = response.data?.response?.authorization_url || '';
-    ctx.session.transferReference = response.data?.response?.reference || '';
-    if (!ctx.session.authUrl) {
-      throw new Error('No authorization URL received from Paystack.');
+    const amount = parseInt(sub.subAmount);
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (isNaN(amount) || amount < 100) {
+      logger.error('Invalid amount', { subId: sub.subId, amount });
+      return ctx.reply('❌ Invalid subscription amount.');
+    }
+    if (!emailRegex.test(user.email)) {
+      logger.error('Invalid email', { userId: user.userId, email: user.email });
+      return ctx.reply('❌ Invalid user email.');
     }
 
+    logger.info('Initiating payment', { subId: sub.subId, userId: user.userId, amount, email: user.email });
+    const response = await fetchWithRetry(
+      'https://quorix-paystack-backend.vercel.app/api/transfer/initiate-transfer',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: amount,
+          email: user.email,
+        }),
+      }
+    );
+
+    const authUrl = response.authorization_url;
+    if (!authUrl) {
+      logger.error('No authorization URL in response', { response });
+      throw new Error(`No authorization URL received from Paystack. Response: ${JSON.stringify(response)}`);
+    }
+
+    ctx.session.authUrl = authUrl;
+    ctx.session.transferReference = response.reference || '';
     return ctx.reply(
       `Click the link to complete your bank transfer:\n\n${ctx.session.authUrl}`,
       Markup.inlineKeyboard([
@@ -229,19 +247,15 @@ export async function verifyPayment(ctx) {
       return ctx.reply('❌ Invalid payment verification request.');
     }
 
-    let response = await axios.get(
-      `https://quorix-paystack-backend.vercel.app/api/transfer/verify-transfer?reference=${transferReference}`
-    );
-    let transferStatus = response.data?.response?.status || '';
-    if (!transferStatus) {
-      throw new Error('No status received from Paystack.');
-    }
-
-    response = await axios.get(
+    const response = await fetchWithRetry(
       'https://quorix-paystack-backend.vercel.app/api/transfer/verify-transfer',
-      { params: { transferDetails: transferStatus } }
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reference: transferReference }),
+      }
     );
-    transferStatus = response.data?.response?.status || '';
+    const transferStatus = response?.data?.status || '';
 
     if (transferStatus === 'pending' || transferStatus === 'failed') {
       return ctx.reply(

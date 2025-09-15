@@ -138,8 +138,7 @@ function escapeMarkdownV2(text) {
     .replace(/([^\w\s\/])/g, '\\$1')
     .replace(/(\\\\[_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\])/g, '$1');
 }
-
-async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
+export async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
   for (let i = 0; i < retries; i++) {
     try {
       const response = await fetch(url, options);
@@ -147,7 +146,7 @@ async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
         const errorBody = await response.text();
         throw new Error(`HTTP ${response.status}: ${errorBody}`);
       }
-      return response;
+      return response.json();
     } catch (err) {
       logger.error(`Retry ${i + 1}/${retries} failed for ${url}`, { error: err.message });
       if (i === retries - 1) throw err;
