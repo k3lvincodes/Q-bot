@@ -193,6 +193,7 @@ async function ensureRegistered(ctx, callback) {
   if (user) {
     ctx.session.persistentUser = 'yes';
     ctx.session.email = user.email;
+    ctx.session.fullName = user.fullName;
     ctx.session.firstName = user.fullName?.split(' ')[0] || '';
     ctx.session.admin = user.admin ? 'true' : 'false';
     logger.info('User found in database', { telegramId, email: user.email });
@@ -227,6 +228,7 @@ bot.command('start', async (ctx) => {
   if (user) {
     ctx.session.persistentUser = 'yes';
     ctx.session.email = user.email;
+    ctx.session.fullName = user.fullName;
     ctx.session.firstName = user.fullName?.split(' ')[0] || '';
     ctx.session.admin = user.admin ? 'true' : 'false';
     logger.info('User found in database', { telegramId, email: user.email });
@@ -428,6 +430,7 @@ bot.on('text', async (ctx, next) => {
     if (user) {
       ctx.session.persistentUser = 'yes';
       ctx.session.email = user.email;
+      ctx.session.fullName = user.fullName;
       ctx.session.firstName = user.fullName?.split(' ')[0] || '';
       ctx.session.admin = user.admin ? 'true' : 'false';
       logger.info('User found in database', { telegramId, email: user.email });
@@ -638,6 +641,46 @@ bot.action('JOINED_SUBS', async (ctx) => {
     logger.error('Failed to answer callback query in JOINED_SUBS', { error: err.message });
   }
   return showJoinedSubscriptions(ctx);
+});
+
+bot.action('LISTED_SUBS_PREV', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    ctx.session.mySubsListPage = Math.max(0, (ctx.session.mySubsListPage || 0) - 1);
+    return showListedSubscriptions(ctx);
+  } catch (err) {
+    logger.error('Failed to handle LISTED_SUBS_PREV', { error: err.message });
+  }
+});
+
+bot.action('LISTED_SUBS_NEXT', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    ctx.session.mySubsListPage = (ctx.session.mySubsListPage || 0) + 1;
+    return showListedSubscriptions(ctx);
+  } catch (err) {
+    logger.error('Failed to handle LISTED_SUBS_NEXT', { error: err.message });
+  }
+});
+
+bot.action('JOINED_SUBS_PREV', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    ctx.session.mySubsJoinedPage = Math.max(0, (ctx.session.mySubsJoinedPage || 0) - 1);
+    return showJoinedSubscriptions(ctx);
+  } catch (err) {
+    logger.error('Failed to handle JOINED_SUBS_PREV', { error: err.message });
+  }
+});
+
+bot.action('JOINED_SUBS_NEXT', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    ctx.session.mySubsJoinedPage = (ctx.session.mySubsJoinedPage || 0) + 1;
+    return showJoinedSubscriptions(ctx);
+  } catch (err) {
+    logger.error('Failed to handle JOINED_SUBS_NEXT', { error: err.message });
+  }
 });
 
 bot.action(/^UNLIST_SUB_(.+)$/, async (ctx) => {
@@ -1009,6 +1052,10 @@ if (process.env.RENDER === 'true') {
     });
   });
 } else {
-  bot.launch();
-  logger.info('✅ Bot running locally');
+  // Delete webhook before starting in long-polling mode for local development
+  bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
+    logger.info('Webhook deleted, starting bot in long-polling mode...');
+    bot.launch();
+    logger.info('✅ Bot running locally');
+  }).catch(err => logger.error('Failed to delete webhook for local dev', { error: err.message }));
 }

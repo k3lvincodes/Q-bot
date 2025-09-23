@@ -66,21 +66,34 @@ export async function handleBrowseSubcategorySelection(ctx, subcategory) {
 
 async function showSubscriptions(ctx) {
   try {
-    const { browseSubcategory, browsePage, browseSort } = ctx.session;
+    const { browseSubcategory, browsePage, browseSort, fullName } = ctx.session;
     const perPage = 10;
     let orderBy = { createdAt: 'desc' }; // Default: Newest
     if (browseSort === 'oldest') orderBy = { createdAt: 'asc' };
-    if (browseSort === 'verified') orderBy = { createdAt: 'desc' };
+    // 'verified' sort will also be newest first among verified users
+    if (browseSort === 'verified') {
+      orderBy = { user: { verified: 'desc' }, createdAt: 'desc' };
+    }
+
+    const conditions = [
+      { subSubCategory: browseSubcategory },
+      { status: 'live' },
+      { subRemSlot: { gt: 0 } },
+    ];
+
+    if (browseSubcategory) {
+      conditions.push({ subSubCategory: browseSubcategory });
+    }
+    if (browseSort === 'verified') {
+      conditions.push({ user: { verified: true } });
+    }
+    if (fullName) {
+      conditions.push({ NOT: { crew: { has: fullName } } });
+    }
 
     const where = {
-      subSubCategory: browseSubcategory,
-      status: 'live',
-      subRemSlot: { gt: 0 }, // Valid for INTEGER
+      AND: conditions,
     };
-
-    if (browseSort === 'verified') {
-      where.user = { verified: true };
-    }
 
     const subscriptions = await prisma.subscription.findMany({
       where,
@@ -248,18 +261,16 @@ export async function verifyPayment(ctx) {
     }
 
     const response = await fetchWithRetry(
-      'https://quorix-paystack-backend.vercel.app/api/transfer/verify-transfer',
+      `https://quorix-paystack-backend.vercel.app/api/transfer/verify-transfer?reference=${transferReference}`,
       {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reference: transferReference }),
+        method: 'GET',
       }
     );
-    const transferStatus = response?.data?.status || '';
+    const transferStatus = response?.status || '';
 
-    if (transferStatus === 'pending' || transferStatus === 'failed') {
+    if (['pending', 'failed', 'ongoing'].includes(transferStatus)) {
       return ctx.reply(
-        `We haven’t received your payment yet. Kindly complete the transfer and try again.\n\n${ctx.session.authUrl}`,
+        `Your payment is still pending. Please complete the transfer to join the subscription.\n\n${ctx.session.authUrl}`,
         Markup.inlineKeyboard([
           [Markup.button.callback('Completed', 'VERIFY_PAYMENT')],
           [Markup.button.callback('Cancel', 'CANCEL_PAYMENT')],
@@ -292,18 +303,40 @@ export async function verifyPayment(ctx) {
         create: { userId: sub.userId, balance: parseInt(sub.subAmount) },
       });
 
+      // Notify the subscription owner
+      try {
+        const ownerId = sub.userId;
+        const joiningUserName = user.fullName || 'A new user';
+        const notificationMessage = `🎉 Great news! ${joiningUserName} has just joined your "${sub.subPlan}" subscription.`;
+
+        await ctx.telegram.sendMessage(ownerId, notificationMessage);
+        logger.info(`Sent new joiner notification to owner ${ownerId} for subscription ${sub.subId}`);
+      } catch (notificationError) {
+        logger.error('Failed to send new joiner notification to subscription owner', {
+          error: notificationError.message,
+        });
+      }
+
       ctx.session.step = null;
       ctx.session.authUrl = null;
       ctx.session.transferReference = null;
       ctx.session.selectedSubId = null;
 
       return ctx.reply(
-        '✅ Payment successful! You have joined the subscription.',
-        Markup.inlineKeyboard([[Markup.button.callback('Back to Menu', 'RETURN_TO_MAIN_MENU')]])
+        '✅ Payment complete! You have successfully joined the subscription.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('Join Another Subscription', 'BROWSE_SUBS')],
+          [Markup.button.callback('Go to Main Menu', 'MAIN_MENU')],
+        ])
       );
     }
 
-    throw new Error(`Unexpected transfer status: ${transferStatus}`);
+    // Handle other statuses or empty status as pending
+    logger.warn('Unexpected or empty transfer status, treating as pending.', { transferStatus });
+    return ctx.reply(
+      `We couldn't confirm your payment status yet. If you have completed the payment, please wait a moment and try again.\n\n${ctx.session.authUrl}`,
+      Markup.inlineKeyboard([[Markup.button.callback('Completed', 'VERIFY_PAYMENT')], [Markup.button.callback('Cancel', 'CANCEL_PAYMENT')]])
+    );
   } catch (err) {
     logger.error('Error in verifyPayment', { error: err.message, stack: err.stack });
     return ctx.reply('❌ Payment verification failed. Please try again.');
