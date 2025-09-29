@@ -8,58 +8,81 @@ datasource db {
 }
 
 model users {
-  id             Int           @id @default(autoincrement())
-  userId         String        @unique
-  fullName       String?
-  email          String        @unique
-  platform       String?
-  admin          Boolean       @default(false)
-  verified       Boolean       @default(false)
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime?
-  balance        balance?
-  subscriptions  subscription[]
-  leaveRequests  leaveRequest[]
+  id            Int            @id @default(autoincrement())
+  userId        String         @unique
+  fullName      String?
+  email         String         @unique
+  platform      String?
+  admin         Boolean        @default(false)
+  verified      Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime?
+  balance       balance?
+  leaveRequests leaveRequest[]
+  subscriptions subscription[]
+  payments      payment[]
 }
 
 model subscription {
-  id             Int           @id @default(autoincrement())
+  id             Int            @id @default(autoincrement())
   userId         String
   subPlan        String?
-  subSlot        Int           // Changed to Int
+  subSlot        Int
   subDuration    String
   subAmount      String
   subEmail       String
   subPassword    String
-  status         String        @default("pending")
-  subId          String        @unique
+  status         String         @default("pending")
+  subId          String         @unique
   subCategory    String?
   subSubCategory String?
-  shareType      String?       @default("login")
-  subRemSlot     Int?          // Changed to Int
-  crew           String[]      @default([])
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  user           users         @relation(fields: [userId], references: [userId])
+  shareType      String?        @default("login")
+  subRemSlot     Int?
+  crew           String[]       @default([])
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
   leaveRequests  leaveRequest[]
+  user           users          @relation(fields: [userId], references: [userId])
 }
 
 model balance {
-  userId         String        @id
-  balance        Int?          @default(50)
-  withdrawn      Int?          @default(0)
-  user           users         @relation(fields: [userId], references: [userId])
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime?
+  userId    String    @id
+  balance   Int?      @default(50)
+  withdrawn Int?      @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime?
+  user      users     @relation(fields: [userId], references: [userId])
 }
 
 model leaveRequest {
-  id             Int           @id @default(autoincrement())
-  userId         String
-  subId          String
-  status         String?       @default("pending")
-  createdAt      DateTime?     @default(now())
-  expiresAt      DateTime?
-  user           users         @relation(fields: [userId], references: [userId])
-  subscription   subscription   @relation(fields: [subId], references: [subId])
+  id           Int          @id @default(autoincrement())
+  userId       String
+  subId        String
+  status       String?      @default("pending")
+  createdAt    DateTime?    @default(now())
+  expiresAt    DateTime?
+  subscription subscription @relation(fields: [subId], references: [subId])
+  user         users        @relation(fields: [userId], references: [userId])
+}
+
+model sessions {
+  id           Int       @id @default(autoincrement())
+  session_key  String    @unique @db.VarChar(255)
+  session_data Json
+  created_at   DateTime? @default(now()) @db.Timestamp(6)
+  updated_at   DateTime? @default(now()) @db.Timestamp(6)
+}
+
+model payment {
+  id        String   @id @default(cuid())
+  userId    String
+  subId     String
+  subPlan   String
+  amount    Int
+  reference String   @unique
+  status    String
+  createdAt DateTime @default(now())
+  user      users    @relation(fields: [userId], references: [userId])
+
+  @@index([userId])
 }

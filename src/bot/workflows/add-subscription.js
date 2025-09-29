@@ -33,9 +33,9 @@ export const addSubscriptionWorkflow = async (ctx) => {
     const buttons = categories.map((c) => [
       Markup.button.callback(c, `CATEGORY_${c.replace(/ /g, '_')}`)
     ]);
-    buttons.push([Markup.button.callback('Return to Main Menu', 'RETURN_TO_MAIN_MENU')]);
+    buttons.push([Markup.button.callback('Back', 'ADMIN_CITY')]);
 
-    await ctx.reply('🎬 Welcome to Add My Subscription!\n\nPlease select a category:', Markup.inlineKeyboard(buttons));
+    await ctx.reply('🎬 Welcome to Add Subscription!\n\nPlease select a category:', Markup.inlineKeyboard(buttons));
   } catch (err) {
     logger.error('Error in addSubscriptionWorkflow', { error: err.message, stack: err.stack });
     return ctx.reply('❌ Error starting add subscription. Please try again.');
@@ -57,7 +57,7 @@ export const handleSubCategorySelection = async (ctx, category) => {
     options.push('Return to Category');
 
     const escapedCat = escapeMarkdownV2(category);
-    await ctx.editMessageText(`📂 You selected: *${escapedCat}*\n\nNow choose a subcategory:`, {
+    await ctx.reply(`📂 You selected: *${escapedCat}*\n\nNow choose a subcategory:`, {
       parse_mode: 'MarkdownV2',
       ...Markup.inlineKeyboard(
         options.map((sub) => [
@@ -98,7 +98,7 @@ export const handlePlanSelection = async (ctx, subSubCat) => {
     }).filter(Boolean);
     buttons.push([Markup.button.callback('Return to Category', 'RETURN_TO_CATEGORY')]);
 
-    await ctx.editMessageText(
+    await ctx.reply(
       `📺 You selected: *${escapeMarkdownV2(subSubCat)}*\n\nNow choose a plan:`,
       {
         parse_mode: 'MarkdownV2',

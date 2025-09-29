@@ -23,6 +23,7 @@ export async function mySubscriptionsWorkflow(ctx) {
 
 export async function showListedSubscriptions(ctx) {
   try {
+    const page = ctx.session.mySubsListPage || 0;
     const subscriptions = await prisma.subscription.findMany({
       where: { userId: ctx.session.userId },
       include: { user: true },
@@ -35,25 +36,32 @@ export async function showListedSubscriptions(ctx) {
       );
     }
 
-    const subList = subscriptions
-      .map((sub) => {
-        return `Subscription ID: ${sub.subId}\n` +
-               `Plan: ${sub.subPlan}\n` +
-               `Status: ${sub.status}\n` +
-               `Crew: ${sub.crew.length > 0 ? sub.crew.join(', ') : 'None'}\n` +
-               `Slots: ${sub.subRemSlot}/${sub.subSlot}\n` +
-               `Amount: ₦${sub.subAmount}/month\n`;
-      })
-      .join('\n');
+    const sub = subscriptions[page];
+    if (!sub) {
+      ctx.session.mySubsListPage = 0;
+      return showListedSubscriptions(ctx);
+    }
 
-    const buttons = subscriptions.map((sub) => [
-      Markup.button.callback('Unlist', `UNLIST_SUB_${sub.subId}`),
-      Markup.button.callback('Update', `UPDATE_SUB_${sub.subId}`),
-    ]);
+    const subDetails =
+      `Your Listed Subscriptions (${page + 1}/${subscriptions.length}):\n\n` +
+      `Subscription ID: ${sub.subId}\n` +
+      `Plan: ${sub.subPlan}\n` +
+      `Status: ${sub.status}\n` +
+      `Crew: ${sub.crew.length > 0 ? sub.crew.join(', ') : 'None'}\n` +
+      `Slots: ${sub.subRemSlot}/${sub.subSlot}\n` +
+      `Amount: ₦${sub.subAmount}/month`;
+
+    const navButtons = [];
+    if (page > 0) navButtons.push(Markup.button.callback('⬅️ Previous', 'LISTED_SUBS_PREV'));
+    if (page < subscriptions.length - 1) navButtons.push(Markup.button.callback('Next ➡️', 'LISTED_SUBS_NEXT'));
 
     return ctx.reply(
-      `Your Listed Subscriptions:\n\n${subList}`,
-      Markup.inlineKeyboard([...buttons, [Markup.button.callback('Back', 'MY_SUBS')]])
+      subDetails,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Unlist', `UNLIST_SUB_${sub.subId}`), Markup.button.callback('Update', `UPDATE_SUB_${sub.subId}`)],
+        navButtons,
+        [Markup.button.callback('Back', 'MY_SUBS')],
+      ])
     );
   } catch (err) {
     logger.error('Error in showListedSubscriptions', { error: err.message, stack: err.stack });
@@ -63,6 +71,7 @@ export async function showListedSubscriptions(ctx) {
 
 export async function showJoinedSubscriptions(ctx) {
   try {
+    const page = ctx.session.mySubsJoinedPage || 0;
     const subscriptions = await prisma.subscription.findMany({
       where: {
         crew: { has: ctx.session.email },
@@ -78,29 +87,37 @@ export async function showJoinedSubscriptions(ctx) {
       );
     }
 
-    const subList = subscriptions
-      .map((sub) => {
-        const created = new Date(sub.createdAt);
-        const expires = new Date(created.setMonth(created.getMonth() + parseInt(sub.subDuration)));
-        const now = new Date();
-        const isExpiring = expires < new Date(now.setDate(now.getDate() + 7));
-        const status = isExpiring ? 'Expiring Soon' : expires < now ? 'Expired' : 'Active';
-        return `Subscription ID: ${sub.subId}\n` +
-               `Plan: ${sub.subPlan}\n` +
-               `Owner: ${sub.user?.fullName || 'Unknown User'}\n` +
-               `Status: ${status}\n` +
-               `Amount: ₦${sub.subAmount}/month\n`;
-      })
-      .join('\n');
+    const sub = subscriptions[page];
+    if (!sub) {
+      ctx.session.mySubsJoinedPage = 0;
+      return showJoinedSubscriptions(ctx);
+    }
 
-    const buttons = subscriptions.map((sub) => [
-      Markup.button.callback('Renew', `RENEW_SUB_${sub.subId}`),
-      Markup.button.callback('Leave', `LEAVE_SUB_${sub.subId}`),
-    ]);
+    const created = new Date(sub.createdAt);
+    const expires = new Date(new Date(created).setMonth(created.getMonth() + parseInt(sub.subDuration)));
+    const now = new Date();
+    const isExpiring = expires < new Date(new Date().setDate(now.getDate() + 7));
+    const status = expires < now ? 'Expired' : isExpiring ? 'Expiring Soon' : 'Active';
+
+    const subDetails =
+      `Your Joined Subscriptions (${page + 1}/${subscriptions.length}):\n\n` +
+      `Subscription ID: ${sub.subId}\n` +
+      `Plan: ${sub.subPlan}\n` +
+      `Owner: ${sub.user?.fullName || 'Unknown User'}\n` +
+      `Status: ${status}\n` +
+      `Amount: ₦${sub.subAmount}/month`;
+
+    const navButtons = [];
+    if (page > 0) navButtons.push(Markup.button.callback('⬅️ Previous', 'JOINED_SUBS_PREV'));
+    if (page < subscriptions.length - 1) navButtons.push(Markup.button.callback('Next ➡️', 'JOINED_SUBS_NEXT'));
 
     return ctx.reply(
-      `Your Joined Subscriptions:\n\n${subList}`,
-      Markup.inlineKeyboard([...buttons, [Markup.button.callback('Back', 'MY_SUBS')]])
+      subDetails,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Renew', `RENEW_SUB_${sub.subId}`), Markup.button.callback('Leave', `LEAVE_SUB_${sub.subId}`)],
+        navButtons,
+        [Markup.button.callback('Back', 'MY_SUBS')],
+      ])
     );
   } catch (err) {
     logger.error('Error in showJoinedSubscriptions', { error: err.message, stack: err.stack });
@@ -145,9 +162,15 @@ export async function updateSubscription(ctx, subId) {
       return ctx.reply('❌ Invalid subscription.');
     }
 
-    ctx.session.updateSubId = subId;
-    ctx.session.step = 'updateSlots';
-    return ctx.reply('Enter new number of slots:');
+    return ctx.reply(
+      'What would you like to update?',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Slots', `UPDATE_SLOTS_${subId}`)],
+        [Markup.button.callback('Share Access', `UPDATE_SHARE_ACCESS_${subId}`)],
+        [Markup.button.callback('Listing Duration', `UPDATE_DURATION_${subId}`)],
+        [Markup.button.callback('Back', 'MY_SUBS')],
+      ])
+    );
   } catch (err) {
     logger.error('Error in updateSubscription', { error: err.message, stack: err.stack });
     return ctx.reply('❌ Error selecting subscription. Please try again.');
@@ -161,12 +184,63 @@ export async function handleUpdateSlots(ctx, text) {
       logger.warn('Invalid slots input', { text });
       return ctx.reply('❌ Invalid slots.');
     }
-    ctx.session.updateSlots = slots;
-    ctx.session.step = 'updateDuration';
-    return ctx.reply('Enter new duration (1–12 months):');
+
+    await prisma.subscription.update({
+      where: { subId: ctx.session.updateSubId },
+      data: {
+        subSlot: slots,
+        subRemSlot: slots, // Reset remaining slots as well
+      },
+    });
+
+    ctx.session.step = null;
+    ctx.session.updateSubId = null;
+    return ctx.reply(
+      '✅ Subscription slots updated successfully.',
+      Markup.inlineKeyboard([[Markup.button.callback('Back to My Subscriptions', 'MY_SUBS')]])
+    );
   } catch (err) {
     logger.error('Error in handleUpdateSlots', { error: err.message, stack: err.stack });
     return ctx.reply('❌ Error updating slots. Please try again.');
+  }
+}
+
+export async function handleUpdateShareAccess(ctx, shareType, details) {
+  try {
+    const { updateSubId } = ctx.session;
+    if (!updateSubId) {
+      return ctx.reply('❌ Session expired. Please start the update again.');
+    }
+
+    const data = {
+      shareType,
+    };
+
+    let notificationText = `Update Request (Share Access):\nSubscription ID: ${updateSubId}\nNew Share Type: ${shareType}`;
+
+    if (shareType === 'login') {
+      data.subEmail = details.email;
+      data.subPassword = details.password;
+      notificationText += `\nNew Email: ${details.email}`;
+    } else if (shareType === 'otp') {
+      data.subEmail = details.whatsapp;
+      notificationText += `\nNew WhatsApp: ${details.whatsapp}`;
+    }
+
+    await prisma.subscription.update({
+      where: { subId: updateSubId },
+      data,
+    });
+
+    ctx.session.step = null;
+    ctx.session.updateSubId = null;
+    return ctx.reply(
+      '✅ Share access details updated successfully.',
+      Markup.inlineKeyboard([[Markup.button.callback('Back to My Subscriptions', 'MY_SUBS')]])
+    );
+  } catch (err) {
+    logger.error('Error in handleUpdateShareAccess', { error: err.message, stack: err.stack });
+    return ctx.reply('❌ Error updating share access. Please try again.');
   }
 }
 
@@ -180,15 +254,15 @@ export async function handleUpdateDuration(ctx, text) {
     await prisma.subscription.update({
       where: { subId: ctx.session.updateSubId },
       data: {
-        subSlot: parseInt(ctx.session.updateSlots),
-        subRemSlot: parseInt(ctx.session.updateSlots),
         subDuration: duration.toString(),
       },
     });
+
     ctx.session.step = null;
+    ctx.session.updateSubId = null;
     return ctx.reply(
-      '✅ Subscription updated.',
-      Markup.inlineKeyboard([[Markup.button.callback('Back', 'MY_SUBS')]])
+      '✅ Subscription duration updated successfully.',
+      Markup.inlineKeyboard([[Markup.button.callback('Back to My Subscriptions', 'MY_SUBS')]])
     );
   } catch (err) {
     logger.error('Error in handleUpdateDuration', { error: err.message, stack: err.stack });

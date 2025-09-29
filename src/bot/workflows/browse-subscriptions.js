@@ -15,10 +15,32 @@ export async function browseSubscriptionsWorkflow(ctx) {
     ctx.session.step = 'browseSubscriptions';
     ctx.session.browsePage = 0;
     ctx.session.browseSort = 'newest';
+
+    const activeSubscriptions = await prisma.subscription.findMany({
+      where: {
+        status: 'live',
+        subRemSlot: { gt: 0 },
+      },
+      select: {
+        subCategory: true,
+      },
+      distinct: ['subCategory'],
+    });
+
+    const availableCategoryNames = activeSubscriptions.map((s) => s.subCategory);
+    const availableCategories = categories.filter((c) => availableCategoryNames.includes(c.name));
+
+    if (availableCategories.length === 0) {
+      return ctx.reply(
+        'There are currently no subscriptions available. Please check back later.',
+        Markup.inlineKeyboard([[Markup.button.callback('Return to Main Menu', 'RETURN_TO_MAIN_MENU')]])
+      );
+    }
+
     return ctx.reply(
-      'Browse and join subscriptions you like.\n\nSelect a category:',
+      'Join subscriptions you like.\n\nSelect a category:',
       Markup.inlineKeyboard([
-        ...categories.map((cat) => [
+        ...availableCategories.map((cat) => [
           Markup.button.callback(cat.name, `BROWSE_CAT_${cat.name.replace(/ /g, '_')}`),
         ]),
         [Markup.button.callback('Return to Main Menu', 'RETURN_TO_MAIN_MENU')],
@@ -32,16 +54,31 @@ export async function browseSubscriptionsWorkflow(ctx) {
 
 export async function handleBrowseCategorySelection(ctx, category) {
   try {
-    const cat = categories.find((c) => c.name === category);
-    if (!cat) {
+    const originalCat = categories.find((c) => c.name === category);
+    if (!originalCat) {
       logger.warn('Invalid category selected', { category });
       return ctx.reply('❌ Invalid category.', Markup.inlineKeyboard([[Markup.button.callback('Back', 'BROWSE')]]));
     }
+
+    const activeSubscriptions = await prisma.subscription.findMany({
+      where: {
+        subCategory: category,
+        status: 'live',
+        subRemSlot: { gt: 0 },
+      },
+      select: {
+        subSubCategory: true,
+      },
+      distinct: ['subSubCategory'],
+    });
+
+    const availableSubcategories = activeSubscriptions.map((s) => s.subSubCategory);
+
     ctx.session.browseCategory = category;
     return ctx.reply(
       `Select a subcategory for ${category}:`,
       Markup.inlineKeyboard([
-        ...cat.subcategories.map((sub) => [
+        ...originalCat.subcategories.filter((sub) => availableSubcategories.includes(sub)).map((sub) => [
           Markup.button.callback(sub, `BROWSE_SUBCAT_${sub.replace(/ /g, '_')}`),
         ]),
         [Markup.button.callback('Back', 'BROWSE')],
@@ -66,33 +103,17 @@ export async function handleBrowseSubcategorySelection(ctx, subcategory) {
 
 async function showSubscriptions(ctx) {
   try {
-    const { browseSubcategory, browsePage, browseSort, fullName } = ctx.session;
-    const perPage = 10;
+    const { browseSubcategory, browsePage, browseSort } = ctx.session;
+    const perPage = 1; // We are showing one at a time
     let orderBy = { createdAt: 'desc' }; // Default: Newest
     if (browseSort === 'oldest') orderBy = { createdAt: 'asc' };
-    // 'verified' sort will also be newest first among verified users
-    if (browseSort === 'verified') {
-      orderBy = { user: { verified: 'desc' }, createdAt: 'desc' };
-    }
-
-    const conditions = [
-      { subSubCategory: browseSubcategory },
-      { status: 'live' },
-      { subRemSlot: { gt: 0 } },
-    ];
-
-    if (browseSubcategory) {
-      conditions.push({ subSubCategory: browseSubcategory });
-    }
-    if (browseSort === 'verified') {
-      conditions.push({ user: { verified: true } });
-    }
-    if (fullName) {
-      conditions.push({ NOT: { crew: { has: fullName } } });
-    }
 
     const where = {
-      AND: conditions,
+      subSubCategory: browseSubcategory,
+      status: 'live',
+      subRemSlot: {
+        gt: 0,
+      },
     };
 
     const subscriptions = await prisma.subscription.findMany({
@@ -106,42 +127,42 @@ async function showSubscriptions(ctx) {
     const total = await prisma.subscription.count({ where });
     const totalPages = Math.ceil(total / perPage);
 
-    if (subscriptions.length === 0) {
+    if (total === 0) {
       return ctx.reply(
-        `No available subscriptions for ${browseSubcategory}.`,
+        `No available subscriptions found for ${browseSubcategory}.`,
         Markup.inlineKeyboard([[Markup.button.callback('Back', 'BROWSE')]])
       );
     }
 
-    const subList = subscriptions
-      .map((record) => {
-        return `Owner: ${record.user?.fullName || 'Unknown User'}\n` +
-               `Plan: ${record.subPlan}\n` +
-               `Duration: ${record.subDuration} month(s)\n` +
-               `Total Slots: ${record.subSlot}\n` +
-               `Available Slots: ${record.subRemSlot}\n` +
-               `Amount: ₦${record.subAmount}/month\n` +
-               `Subscription ID: ${record.subId}\n`;
-      })
-      .join('\n\n');
+    const sub = subscriptions[0]; // We fetch one at a time now
+    if (!sub) {
+      // If current page is empty, reset to page 0
+      ctx.session.browsePage = 0;
+      return showSubscriptions(ctx);
+    }
 
-    const buttons = subscriptions.map((sub) => [
-      Markup.button.callback('Select', `SELECT_SUB_${sub.subId}`),
-    ]);
+    const subDetails =
+      `Subscriptions for ${browseSubcategory} (${browsePage + 1}/${total}):\n\n` +
+      `Owner: ${sub.user?.fullName || 'Unknown User'}\n` +
+      `Plan: ${sub.subPlan}\n` +
+      `Duration: ${sub.subDuration} month(s)\n` +
+      `Total Slots: ${sub.subSlot}\n` +
+      `Available Slots: ${sub.subRemSlot}\n` +
+      `Amount: ₦${sub.subAmount}/month\n` +
+      `Subscription ID: ${sub.subId}\n`;
+
     const navButtons = [];
-    if (browsePage > 0) navButtons.push(Markup.button.callback('Previous', 'BROWSE_PREV'));
-    if (browsePage < totalPages - 1) navButtons.push(Markup.button.callback('Next', 'BROWSE_NEXT'));
+    if (browsePage > 0) navButtons.push(Markup.button.callback('⬅️ Previous', 'BROWSE_PREV'));
+    if (browsePage < total - 1) navButtons.push(Markup.button.callback('Next ➡️', 'BROWSE_NEXT'));
     const sortButtons = [
       Markup.button.callback('Newest', 'SORT_NEWEST'),
       Markup.button.callback('Oldest', 'SORT_OLDEST'),
-      Markup.button.callback('Verified Listers', 'SORT_VERIFIED'),
     ];
 
-    await ctx.deleteMessage().catch(() => {}); // Prevent ERR_HTTP_HEADERS_SENT
     return ctx.reply(
-      `Subscriptions for ${browseSubcategory}:\n\n${subList}`,
+      subDetails,
       Markup.inlineKeyboard([
-        ...buttons,
+        [Markup.button.callback('Select', `SELECT_SUB_${sub.subId}`)],
         navButtons.length > 0 ? navButtons : [],
         sortButtons,
         [Markup.button.callback('Back', 'BROWSE')],
@@ -297,6 +318,18 @@ export async function verifyPayment(ctx) {
         },
       });
 
+      // Create a payment history record
+      await prisma.payment.create({
+        data: {
+          userId: user.userId,
+          subId: sub.subId,
+          subPlan: sub.subPlan,
+          amount: parseInt(sub.subAmount),
+          reference: transferReference,
+          status: 'success',
+        },
+      });
+
       await prisma.balance.upsert({
         where: { userId: sub.userId },
         update: { balance: { increment: parseInt(sub.subAmount) } },
@@ -323,9 +356,10 @@ export async function verifyPayment(ctx) {
       ctx.session.selectedSubId = null;
 
       return ctx.reply(
-        '✅ Payment complete! You have successfully joined the subscription.',
+        '✅ Payment complete! You have successfully joined the subscription.\n\nPlease send your email address and payment reference (from your payment history) to our live support to get your login details.',
         Markup.inlineKeyboard([
-          [Markup.button.callback('Join Another Subscription', 'BROWSE_SUBS')],
+          [Markup.button.callback('Go to Live Support', 'LIVE_SUPPORT')],
+          [Markup.button.callback('Join Another Subscription', 'BROWSE')],
           [Markup.button.callback('Go to Main Menu', 'MAIN_MENU')],
         ])
       );

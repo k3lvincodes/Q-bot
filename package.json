@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon src/bot/index.js",
-    "start": "npm run prisma:generate && node src/bot/index.js",
+    "start": "node src/bot/index.js",
+    "build": "prisma generate && prisma migrate deploy",
     "prisma:generate": "prisma generate",
-    "prisma:push": "prisma db push",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"
   },
