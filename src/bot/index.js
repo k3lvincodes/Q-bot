@@ -84,6 +84,13 @@ app.use((err, req, res, next) => {
 bot.use(safeSession());
 startCronJobs();
 
+// Global error handler for Telegraf
+bot.catch((err, ctx) => {
+  logger.error(`Unhandled error processing ${ctx.updateType}`, { error: err, update: ctx.update });
+  // You can also add a reply to the user here, if appropriate
+  // ctx.reply('An unexpected error occurred. Please try again later.').catch(e => logger.error('Failed to send error message to user', e));
+});
+
 // Function to generate a short subscription ID (e.g., Q_D00ZG)
 async function generateShortSubId() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -244,6 +251,12 @@ bot.command('start', async (ctx) => {
   ctx.session.step = 'collectFullName';
   logger.info('Initialized new user session', { telegramId, session: { ...ctx.session } });
   await ctx.reply(`Welcome to Q! Please enter your full name:`);
+});
+
+// Handle cases where a user blocks the bot
+bot.on('my_chat_member', async (ctx) => {
+  const newStatus = ctx.myChatMember.new_chat_member.status;
+  logger.info(`User ${ctx.from.id} changed bot status to: ${newStatus}`);
 });
 
 bot.hears(/menu/i, async (ctx) => {
