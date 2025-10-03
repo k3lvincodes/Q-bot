@@ -48,31 +48,6 @@ dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
 
-// Middleware to check for missing headers
-app.use((req, res, next) => {
-  if (!req.headers['content-type'] && !req.headers['transfer-encoding']) {
-    logger.warn('Missing content-type or transfer-encoding', { url: req.url });
-    return res.status(400).send('Bad Request: Missing content-type or transfer-encoding');
-  }
-  next();
-});
-
-// Use body-parser with error handling
-app.use(bodyParser.json({
-  verify: (req, res, buf) => {
-    try {
-      JSON.parse(buf.toString());
-    } catch (e) {
-      logger.error('Invalid JSON in request', { error: e.message });
-      res.status(400).send('Invalid JSON');
-      throw e;
-    }
-  }
-}));
-
-// Telegraf webhook
-app.use(bot.webhookCallback('/'));
-
 // Error handling middleware
 app.use((err, req, res, next) => {
   logger.error('Express error', { error: err.message, stack: err.stack });
@@ -1462,22 +1437,32 @@ bot.action('EDIT_EMAIL', async (ctx) => {
 });
 
 if (process.env.RENDER === 'true') {
+  // Use express.json() which is the modern replacement for body-parser
+  app.use(express.json());
+
+  // Health check endpoint
   app.get('/', (req, res) => {
     res.send('🤖');
   });
+
   const port = parseInt(process.env.PORT) || 3000;
   const webhookUrl = process.env.RENDER_EXTERNAL_URL;
-  if (!webhookUrl.startsWith('https://')) {
-    logger.error('Webhook URL must be HTTPS', { webhookUrl });
+
+  if (!webhookUrl) {
+    logger.error('RENDER_EXTERNAL_URL is not set. Webhook cannot be set.');
     process.exit(1);
   }
-  app.listen(port, () => {
+
+  // Use a secret path for the webhook to enhance security
+  const secretPath = `/telegraf/${bot.secretPathComponent()}`;
+
+  // Set the webhook callback
+  app.use(bot.webhookCallback(secretPath));
+
+  app.listen(port, async () => {
     logger.info(`✅ Bot running on port ${port}`);
-    bot.telegram.setWebhook(webhookUrl).then(() => {
-      logger.info(`Webhook set to ${webhookUrl}`);
-    }).catch((err) => {
-      logger.error('Webhook set failed', { error: err.message });
-    });
+    await bot.telegram.setWebhook(`${webhookUrl}${secretPath}`);
+    logger.info(`Webhook set to ${webhookUrl}${secretPath}`);
   });
 } else {
   // Delete webhook before starting in long-polling mode for local development
