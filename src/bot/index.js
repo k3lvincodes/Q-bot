@@ -1436,39 +1436,33 @@ bot.action('EDIT_EMAIL', async (ctx) => {
   });
 });
 
-if (process.env.RENDER === 'true') {
-  // Use express.json() which is the modern replacement for body-parser
-  app.use(express.json());
+async function startBot() {
+  if (process.env.RENDER === 'true') {
+    // Production mode on Render
+    const port = parseInt(process.env.PORT) || 3000;
+    const domain = process.env.RENDER_EXTERNAL_URL;
 
-  // Health check endpoint
-  app.get('/', (req, res) => {
-    res.send('🤖');
-  });
+    if (!domain) {
+      logger.error('RENDER_EXTERNAL_URL is not set. Webhook cannot be set.');
+      process.exit(1);
+    }
 
-  const port = parseInt(process.env.PORT) || 3000;
-  const webhookUrl = process.env.RENDER_EXTERNAL_URL;
-
-  if (!webhookUrl) {
-    logger.error('RENDER_EXTERNAL_URL is not set. Webhook cannot be set.');
-    process.exit(1);
+    logger.info(`Starting bot in webhook mode on port ${port}`);
+    // The `launch` method will set the webhook and start a server to listen for updates.
+    // It returns a promise that resolves when the bot is launched.
+    await bot.launch({
+      webhook: {
+        domain,
+        port,
+      },
+    });
+    logger.info(`Bot is listening for updates at ${domain}`);
+  } else {
+    // Development mode (long polling)
+    logger.info('Starting bot in long-polling mode...');
+    await bot.launch();
+    logger.info('Bot started successfully in development mode.');
   }
-
-  // Use a secret path for the webhook to enhance security
-  const secretPath = `/telegraf/${bot.secretPathComponent()}`;
-
-  // Set the webhook callback
-  app.use(bot.webhookCallback(secretPath));
-
-  app.listen(port, async () => {
-    logger.info(`✅ Bot running on port ${port}`);
-    await bot.telegram.setWebhook(`${webhookUrl}${secretPath}`);
-    logger.info(`Webhook set to ${webhookUrl}${secretPath}`);
-  });
-} else {
-  // Delete webhook before starting in long-polling mode for local development
-  bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
-    logger.info('Webhook deleted, starting bot in long-polling mode...');
-    bot.launch();
-    logger.info('✅ Bot running locally');
-  }).catch(err => logger.error('Failed to delete webhook for local dev', { error: err.message }));
 }
+
+startBot().catch((err) => logger.error('Failed to start bot', { error: err.message, stack: err.stack }));
