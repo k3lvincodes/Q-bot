@@ -1,5 +1,5 @@
 import { Markup } from 'telegraf';
-import { prisma } from '../../db/client.js';
+import { getPrisma } from '../../db/client.js';
 import { subcategoriesMap } from './add-subscription.js';
 import logger from '../../utils/logger.js';
 import { fetchWithRetry } from '../index.js';
@@ -11,6 +11,7 @@ const categories = Object.keys(subcategoriesMap).map((name) => ({
 }));
 
 export async function browseSubscriptionsWorkflow(ctx) {
+  const prisma = getPrisma();
   try {
     ctx.session.step = 'browseSubscriptions';
     ctx.session.browsePage = 0;
@@ -53,6 +54,7 @@ export async function browseSubscriptionsWorkflow(ctx) {
 }
 
 export async function handleBrowseCategorySelection(ctx, category) {
+  const prisma = getPrisma();
   try {
     const originalCat = categories.find((c) => c.name === category);
     if (!originalCat) {
@@ -102,6 +104,7 @@ export async function handleBrowseSubcategorySelection(ctx, subcategory) {
 }
 
 async function showSubscriptions(ctx) {
+  const prisma = getPrisma();
   try {
     const { browseSubcategory, browsePage, browseSort } = ctx.session;
     const perPage = 1; // We are showing one at a time
@@ -175,6 +178,7 @@ async function showSubscriptions(ctx) {
 }
 
 export async function handleSubscriptionSelection(ctx, subId) {
+  const prisma = getPrisma();
   try {
     const sub = await prisma.subscription.findUnique({
       where: { subId },
@@ -210,6 +214,7 @@ export async function handleSubscriptionSelection(ctx, subId) {
 }
 
 export async function initiatePayment(ctx) {
+  const prisma = getPrisma();
   try {
     const sub = await prisma.subscription.findUnique({
       where: { subId: ctx.session.selectedSubId },
@@ -271,6 +276,7 @@ export async function initiatePayment(ctx) {
 }
 
 export async function verifyPayment(ctx) {
+  const prisma = getPrisma();
   try {
     const { transferReference, selectedSubId } = ctx.session;
     if (!transferReference || !selectedSubId) {

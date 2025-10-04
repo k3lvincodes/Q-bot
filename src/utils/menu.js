@@ -7,7 +7,7 @@ export function showMainMenu(ctx) {
     [Markup.button.callback('Support & FAQs', 'SUPPORT')],
   ];
 
-  if (ctx.session.admin === true || ctx.session.admin === 'true') {
+  if (ctx.session.admin === 'true') {
     menuButtons.push([Markup.button.callback('Admin City', 'ADMIN_CITY')]);
   }
 

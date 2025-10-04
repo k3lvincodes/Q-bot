@@ -1,5 +1,5 @@
 import { Markup } from 'telegraf';
-import { prisma } from '../../db/client.js';
+import { getPrisma } from '../../db/client.js';
 import axios from 'axios';
 import logger from '../../utils/logger.js';
 import { initiatePayment } from './browse-subscriptions.js';
@@ -22,6 +22,7 @@ export async function mySubscriptionsWorkflow(ctx) {
 }
 
 export async function showListedSubscriptions(ctx) {
+  const prisma = getPrisma();
   try {
     const page = ctx.session.mySubsListPage || 0;
     const subscriptions = await prisma.subscription.findMany({
@@ -70,6 +71,7 @@ export async function showListedSubscriptions(ctx) {
 }
 
 export async function showJoinedSubscriptions(ctx) {
+  const prisma = getPrisma();
   try {
     const page = ctx.session.mySubsJoinedPage || 0;
     const subscriptions = await prisma.subscription.findMany({
@@ -126,6 +128,7 @@ export async function showJoinedSubscriptions(ctx) {
 }
 
 export async function unlistSubscription(ctx, subId) {
+  const prisma = getPrisma();
   try {
     const sub = await prisma.subscription.findUnique({ where: { subId } });
     if (!sub || sub.userId !== ctx.session.userId) {
@@ -155,6 +158,7 @@ export async function unlistSubscription(ctx, subId) {
 }
 
 export async function updateSubscription(ctx, subId) {
+  const prisma = getPrisma();
   try {
     const sub = await prisma.subscription.findUnique({ where: { subId } });
     if (!sub || sub.userId !== ctx.session.userId) {
@@ -178,6 +182,7 @@ export async function updateSubscription(ctx, subId) {
 }
 
 export async function handleUpdateSlots(ctx, text) {
+  const prisma = getPrisma();
   try {
     const slots = parseInt(text.trim());
     if (isNaN(slots) || slots <= 0) {
@@ -206,6 +211,7 @@ export async function handleUpdateSlots(ctx, text) {
 }
 
 export async function handleUpdateShareAccess(ctx, shareType, details) {
+  const prisma = getPrisma();
   try {
     const { updateSubId } = ctx.session;
     if (!updateSubId) {
@@ -245,6 +251,7 @@ export async function handleUpdateShareAccess(ctx, shareType, details) {
 }
 
 export async function handleUpdateDuration(ctx, text) {
+  const prisma = getPrisma();
   try {
     const duration = parseInt(text.trim());
     if (isNaN(duration) || duration < 1 || duration > 12) {
@@ -271,6 +278,7 @@ export async function handleUpdateDuration(ctx, text) {
 }
 
 export async function renewSubscription(ctx, subId) {
+  const prisma = getPrisma();
   try {
     const sub = await prisma.subscription.findUnique({ where: { subId } });
     if (!sub || !sub.crew.includes(ctx.session.email)) {
@@ -299,6 +307,7 @@ export async function renewSubscription(ctx, subId) {
 }
 
 export async function leaveSubscription(ctx, subId, confirm = false) {
+  const prisma = getPrisma();
   try {
     const sub = await prisma.subscription.findUnique({ where: { subId } });
     if (!sub || !sub.crew.includes(ctx.session.email)) {
@@ -342,6 +351,7 @@ export async function leaveSubscription(ctx, subId, confirm = false) {
 }
 
 export async function cancelLeaveRequest(ctx, subId) {
+  const prisma = getPrisma();
   try {
     const leaveRequest = await prisma.leaveRequest.findFirst({
       where: {

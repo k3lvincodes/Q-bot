@@ -1,11 +1,12 @@
-import { prisma } from '../db/client.js';
 import { CronJob } from 'cron';
+import { getPrisma } from '../db/client.js';
 import logger from './logger.js';
 
 export function startCronJobs() {
   new CronJob('0 0 * * *', async () => {
     try {
       const now = new Date();
+      const prisma = getPrisma();
       const expiredRequests = await prisma.leaveRequest.findMany({
         where: {
           status: 'pending',

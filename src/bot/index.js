@@ -41,14 +41,9 @@ import {
   handleLiveSupport,
 } from './workflows/support.js';
 import subscriptionPrices, { planIdMap } from '../utils/subscription-prices.js';
-import { PrismaClient } from '@prisma/client';
+import { getPrisma } from '../db/client.js';
 
 dotenv.config();
-
-// Conditionally initialize Prisma Client
-// For local dev, initialize globally. For production (Render), initialize inside startBot.
-const isProduction = process.env.RENDER === 'true';
-let prisma = isProduction ? null : new PrismaClient();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
@@ -174,12 +169,9 @@ function clearListingSession(ctx) {
 
 // Ensure user is registered before proceeding with actions
 const ensureRegistered = async (ctx, next) => {
+  const prisma = getPrisma();
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
-
-  if (ctx.session.persistentUser === 'yes' && ctx.session.email) {
-    return next(); // User is registered, proceed to the next middleware
-  }
 
   const user = await prisma.users.findUnique({ where: { userId: telegramId } });
   if (user) {
@@ -204,6 +196,7 @@ const ensureRegistered = async (ctx, next) => {
 
 // Handle /start to reset session and initiate registration
 bot.command('start', async (ctx) => {
+  const prisma = getPrisma();
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
   clearListingSession(ctx); // Reset any existing workflow
@@ -244,6 +237,7 @@ bot.hears(/menu/i, async (ctx) => {
 });
 
 bot.on('text', async (ctx, next) => {
+  const prisma = getPrisma();
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
   const text = ctx.message.text;
@@ -1076,52 +1070,46 @@ bot.action('MAIN_MENU', async (ctx) => {
 });
 
 bot.action('CONFIRM_SUBSCRIPTION', async (ctx) => {
+  const prisma = getPrisma();
   try {
     await ctx.answerCbQuery();
   } catch (err) {
     logger.error('Failed to answer callback query in CONFIRM_SUBSCRIPTION', { error: err.message });
   }
   await ctx.deleteMessage().catch(() => {});
-  await ensureRegistered(ctx, async () => {
-    try {
-      await prisma.subscription.create({
-        data: {
-          userId: ctx.session.userId,
-          subPlan: ctx.session.subPlan,
-          subSlot: parseInt(ctx.session.subSlot),
-          subDuration: ctx.session.subDuration.toString(),
-          subAmount: ctx.session.subAmount.toString(),
-          subEmail: ctx.session.subEmail,
-          subPassword: ctx.session.subPassword || '',
-          status: 'live',
-          subId: ctx.session.subId,
-          subCategory: ctx.session.subCat,
-          subSubCategory: ctx.session.subSubCat,
-          subRemSlot: parseInt(ctx.session.subSlot),
-          crew: [],
-          shareType: ctx.session.shareType || 'login',
-        },
-      });
-      logger.info(`Subscription ${ctx.session.subId} created for user ${ctx.session.userId}`);
-    } catch (err) {
-      logger.error('Failed to save subscription', { error: err.message, stack: err.stack });
-      await ctx.reply('❌ Error saving subscription. Please try again.');
-      clearListingSession(ctx);
-      return showMainMenu(ctx);
-    }
-
+  try {
+    await prisma.subscription.create({
+      data: {
+        userId: ctx.session.userId,
+        subPlan: ctx.session.subPlan,
+        subSlot: parseInt(ctx.session.subSlot),
+        subDuration: ctx.session.subDuration.toString(),
+        subAmount: ctx.session.subAmount.toString(),
+        subEmail: ctx.session.subEmail,
+        subPassword: ctx.session.subPassword || '',
+        status: 'live',
+        subId: ctx.session.subId,
+        subCategory: ctx.session.subCat,
+        subSubCategory: ctx.session.subSubCat,
+        subRemSlot: parseInt(ctx.session.subSlot),
+        crew: [],
+        shareType: ctx.session.shareType || 'login',
+      },
+    });
+    logger.info(`Subscription ${ctx.session.subId} created for user ${ctx.session.userId}`);
+  } catch (err) {
+    logger.error('Failed to save subscription', { error: err.message, stack: err.stack });
+    await ctx.reply('❌ Error saving subscription. Please try again.');
     clearListingSession(ctx);
-    await ctx.reply('✅ Subscription successfully listed and is now live!');
     return showMainMenu(ctx);
-  });
+  }
+
+  clearListingSession(ctx);
+  await ctx.reply('✅ Subscription successfully listed and is now live!');
+  return showMainMenu(ctx);
 });
 
-bot.action('CANCEL_SUBSCRIPTION', async (ctx) => {
-  try {
-    await ctx.answerCbQuery();
-  } catch (err) {
-    logger.error('Failed to answer callback query in CANCEL_SUBSCRIPTION', { error: err.message });
-  }
+bot.action('CANCEL_SUBSCRIPTION', ensureRegistered, async (ctx) => {
   await ctx.deleteMessage().catch(() => {});
   clearListingSession(ctx);
   await ctx.reply('❌ Listing cancelled.');
@@ -1232,26 +1220,19 @@ bot.action('ADMIN_CITY', async (ctx) => {
   );
 });
 
-bot.action('WALLET', async (ctx) => {
-  try {
-    await ctx.answerCbQuery();
-  } catch (err) {
-    logger.error('Failed to answer callback query in WALLET', { error: err.message });
-  }
+bot.action('WALLET', ensureRegistered, async (ctx) => {
   await ctx.deleteMessage().catch(() => {});
-
-  await ensureRegistered(ctx, async () => {
-    await ctx.reply(
-      'Wallet / Payments:',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('Payment History', 'PAYMENT_HISTORY')],
-        [Markup.button.callback('Back to Profile', 'PROFILE')],
-      ])
-    );
-  });
+  await ctx.reply(
+    'Wallet / Payments:',
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Payment History', 'PAYMENT_HISTORY')],
+      [Markup.button.callback('Back to Profile', 'PROFILE')],
+    ])
+  );
 });
 
-bot.action('PAYMENT_HISTORY', async (ctx) => {
+bot.action('PAYMENT_HISTORY', ensureRegistered, async (ctx) => {
+  const prisma = getPrisma();
   try {
     await ctx.answerCbQuery();
   } catch (err) {
@@ -1259,42 +1240,40 @@ bot.action('PAYMENT_HISTORY', async (ctx) => {
   }
   await ctx.deleteMessage().catch(() => {});
 
-  await ensureRegistered(ctx, async () => {
-    try {
-      const payments = await prisma.payment.findMany({
-        where: { userId: ctx.session.userId },
-        orderBy: { createdAt: 'desc' },
-        take: 10, // Limit to the last 10 payments for now
-      });
+  try {
+    const payments = await prisma.payment.findMany({
+      where: { userId: ctx.session.userId },
+      orderBy: { createdAt: 'desc' },
+      take: 10, // Limit to the last 10 payments for now
+    });
 
-      if (payments.length === 0) {
-        return ctx.reply(
-          'You have no payment history.',
-          Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]])
-        );
-      }
-
-      let historyMessage = '<b>Your Recent Payments:</b>\n\n';
-      payments.forEach((p) => {
-        historyMessage +=
-          `<b>Plan:</b> ${p.subPlan}\n` +
-          `<b>Amount:</b> ₦${p.amount}\n` +
-          `<b>Date:</b> ${p.createdAt.toLocaleDateString()}\n` +
-          `<b>Ref:</b> ${p.reference}\n\n`;
-      });
-
-      await ctx.reply(historyMessage, {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]]),
-      });
-    } catch (error) {
-      logger.error('Error fetching payment history', { error: error.message, stack: error.stack });
-      await ctx.reply('❌ An error occurred while fetching your payment history.');
+    if (payments.length === 0) {
+      return ctx.reply(
+        'You have no payment history.',
+        Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]])
+      );
     }
-  });
+
+    let historyMessage = '<b>Your Recent Payments:</b>\n\n';
+    payments.forEach((p) => {
+      historyMessage +=
+        `<b>Plan:</b> ${p.subPlan}\n` +
+        `<b>Amount:</b> ₦${p.amount}\n` +
+        `<b>Date:</b> ${p.createdAt.toLocaleDateString()}\n` +
+        `<b>Ref:</b> ${p.reference}\n\n`;
+    });
+
+    await ctx.reply(historyMessage, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]]),
+    });
+  } catch (error) {
+    logger.error('Error fetching payment history', { error: error.message, stack: error.stack });
+    await ctx.reply('❌ An error occurred while fetching your payment history.');
+  }
 });
 
-bot.action('WALLET', async (ctx) => {
+bot.action('WALLET', ensureRegistered, async (ctx) => {
   try {
     await ctx.answerCbQuery();
   } catch (err) {
@@ -1311,7 +1290,7 @@ bot.action('WALLET', async (ctx) => {
   );
 });
 
-bot.action('PAYMENT_HISTORY', async (ctx) => {
+bot.action('PAYMENT_HISTORY', ensureRegistered, async (ctx) => {
   try {
     await ctx.answerCbQuery();
   } catch (err) {
@@ -1354,6 +1333,7 @@ bot.action('PAYMENT_HISTORY', async (ctx) => {
 });
 
 bot.action('VIEW_PERSONAL_INFO', async (ctx) => {
+  const prisma = getPrisma();
   try { // ensureRegistered is applied to this
     await ctx.answerCbQuery();
   } catch (err) {
@@ -1431,14 +1411,10 @@ bot.on('callback_query', async (ctx, next) => {
   } catch (err) {
     logger.warn('Failed to answer callback query in middleware', { error: err.message });
   }
-  return ensureRegistered(ctx, next);
+  return await ensureRegistered(ctx, next);
 });
 
 async function startBot() {
-  if (isProduction) {
-    prisma = new PrismaClient(); // Initialize for production
-  }
-
   // Always set up Express middleware and health check
   app.use(express.json());
   app.use(bodyParser.json());

@@ -1,5 +1,6 @@
 import { Markup } from 'telegraf';
 import subscriptionPrices, { planIdMap } from '../../utils/subscription-prices.js';
+import { getPrisma } from '../../db/client.js';
 import logger from '../../utils/logger.js';
 
 export const subcategoriesMap = {
@@ -113,6 +114,7 @@ export const handlePlanSelection = async (ctx, subSubCat) => {
 };
 
 export async function handleDurationSelection(ctx, duration) {
+  const prisma = getPrisma();
   try {
     const months = parseInt(duration);
     if (isNaN(months) || months < 1 || months > 12) {
