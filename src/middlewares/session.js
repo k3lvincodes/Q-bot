@@ -6,15 +6,16 @@ import 'dotenv/config';
 // Validate DATABASE_URL
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
-  logger.warn('DATABASE_URL not set, using in-memory sessions');
+  logger.warn('DATABASE_URL not set, using in-memory sessions.');
 }
 
-// Initialize PostgreSQL client if DATABASE_URL is set
-const pool = databaseUrl
+// Initialize PostgreSQL client only if DATABASE_URL is set and in a production environment
+const isProduction = process.env.RENDER === 'true' || process.env.NODE_ENV === 'production';
+const pool = databaseUrl && isProduction
   ? new Pool({
       connectionString: databaseUrl,
       ssl: {
-        rejectUnauthorized: false, // Railway uses self-signed certs
+        rejectUnauthorized: false, // Required for some cloud providers like Railway/Render
       },
     })
   : null;
