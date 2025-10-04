@@ -1427,7 +1427,7 @@ bot.use(
 );
 
 async function startBot() {
-  if (process.env.RENDER === 'true' && process.env.RENDER_EXTERNAL_URL) {
+  if (process.env.RENDER && process.env.RENDER_EXTERNAL_URL) {
     // Production mode on Render
     const port = parseInt(process.env.PORT) || 3000;
     const domain = process.env.RENDER_EXTERNAL_URL;
