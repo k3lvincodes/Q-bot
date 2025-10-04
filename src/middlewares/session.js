@@ -11,13 +11,17 @@ if (!databaseUrl) {
 
 // Initialize PostgreSQL client only if DATABASE_URL is set and in a production environment
 const isProduction = process.env.RENDER === 'true' || process.env.NODE_ENV === 'production';
+
+const connectionOptions = {
+  connectionString: databaseUrl,
+};
+
+if (isProduction) {
+  connectionOptions.ssl = true; // Supabase requires SSL
+}
+
 const pool = databaseUrl && isProduction
-  ? new Pool({
-      connectionString: databaseUrl,
-      ssl: {
-        rejectUnauthorized: false, // Required for some cloud providers like Railway/Render
-      },
-    })
+  ? new Pool(connectionOptions)
   : null;
 
 // Retry mechanism for database operations
@@ -43,7 +47,7 @@ async function testConnection() {
     const client = await pool.connect();
     const res = await client.query('SELECT NOW()');
     client.release();
-    logger.info('Successfully connected to Railway PostgreSQL database', { timestamp: res.rows[0].now });
+    logger.info('Successfully connected to the Supabase PostgreSQL database', { timestamp: res.rows[0].now });
     return true;
   } catch (err) {
     logger.error('Database connection test failed', { error: err.message, stack: err.stack });
