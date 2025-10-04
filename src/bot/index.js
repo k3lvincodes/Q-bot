@@ -1427,26 +1427,31 @@ bot.use(
 );
 
 async function startBot() {
-  if (process.env.RENDER && process.env.RENDER_EXTERNAL_URL) {
+  if (process.env.RENDER === 'true' && process.env.RENDER_EXTERNAL_URL) {
     // Production mode on Render
-    const port = parseInt(process.env.PORT) || 3000;
-    const domain = process.env.RENDER_EXTERNAL_URL;
+    try {
+      const port = parseInt(process.env.PORT) || 3000;
+      const domain = process.env.RENDER_EXTERNAL_URL;
+      const secretPath = `/telegraf/${bot.secretPathComponent()}`;
 
-    if (!domain) {
-      logger.error('RENDER_EXTERNAL_URL is not set. Webhook cannot be set.');
+      // Health check endpoint for Render
+      app.get('/health', (req, res) => {
+        res.status(200).json({ status: 'ok' });
+      });
+
+      // Use the telegraf webhook handler
+      app.use(bot.webhookCallback(secretPath));
+
+      await bot.telegram.setWebhook(`${domain}${secretPath}`);
+      logger.info(`Webhook set to ${domain}${secretPath}`);
+
+      app.listen(port, '0.0.0.0', () => {
+        logger.info(`Bot is listening for updates on port ${port}`);
+      });
+    } catch (err) {
+      logger.error('Failed to start bot in webhook mode', { error: err.message, stack: err.stack });
       process.exit(1);
     }
-
-    logger.info(`Starting bot in webhook mode on port ${port}`);
-    // The `launch` method will set the webhook and start a server to listen for updates.
-    // It returns a promise that resolves when the bot is launched.
-    await bot.launch({
-      webhook: {
-        domain,
-        port,
-      },
-    });
-    logger.info(`Bot is listening for updates at ${domain}`);
   } else {
     // Development mode (long polling)
     logger.info('Starting bot in long-polling mode...');
