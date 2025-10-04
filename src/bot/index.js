@@ -1427,27 +1427,31 @@ bot.use(
 );
 
 async function startBot() {
-  if (process.env.RENDER === 'true' && process.env.RENDER_EXTERNAL_URL) {
+  // Always set up Express middleware and health check
+  app.use(express.json());
+  app.use(bodyParser.json());
+  app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+  });
+
+  if (process.env.RENDER === 'true' && process.env.RENDER_EXTERNAL_URL) { // Use strict check for 'true'
     // Production mode on Render
     try {
       const port = parseInt(process.env.PORT) || 3000;
       const domain = process.env.RENDER_EXTERNAL_URL;
-      const secretPath = `/telegraf/${bot.secretPathComponent()}`;
-
-      // Health check endpoint for Render
-      app.get('/health', (req, res) => {
-        res.status(200).json({ status: 'ok' });
-      });
+      const webhookPath = `/webhook`; // Using a simpler, explicit path
 
       // Use the telegraf webhook handler
-      app.use(bot.webhookCallback(secretPath));
+      app.use(bot.webhookCallback(webhookPath));
 
-      await bot.telegram.setWebhook(`${domain}${secretPath}`);
-      logger.info(`Webhook set to ${domain}${secretPath}`);
-
-      app.listen(port, '0.0.0.0', () => {
-        logger.info(`Bot is listening for updates on port ${port}`);
+      // Start the server first
+      app.listen(port, '0.0.0.0', async () => {
+        logger.info(`Express server listening on port ${port}`);
+        // Set the webhook only after the server is listening
+        await bot.telegram.setWebhook(`${domain}${webhookPath}`);
+        logger.info(`Webhook set to ${domain}${webhookPath}`);
       });
+
     } catch (err) {
       logger.error('Failed to start bot in webhook mode', { error: err.message, stack: err.stack });
       process.exit(1);
