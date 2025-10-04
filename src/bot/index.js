@@ -184,10 +184,12 @@ const ensureRegistered = async (ctx, next) => {
     ctx.session.firstName = user.fullName?.split(' ')[0] || user.fullName;
     ctx.session.admin = user.admin ? 'true' : 'false';
     logger.info('User found in database', { telegramId, email: user.email });
-    return next(); // User found, proceed
+    if (next) return next(); // User found, proceed
   } else {
     // User not found, start registration
     ctx.session.persistentUser = 'no';
+    ctx.session.email = null; // Ensure email is cleared
+    ctx.session.fullName = null; // Ensure fullName is cleared
     ctx.session.platform = 'telegram';
     ctx.session.step = 'collectFullName';
     logger.info('New user detected. Starting registration.', { telegramId });
@@ -1418,13 +1420,16 @@ bot.action('EDIT_EMAIL', async (ctx) => {
   });
 });
 
-// Apply the middleware to all actions that require registration
-bot.use(
-  Composer.optional(
-    (ctx) => ctx.callbackQuery,
-    ensureRegistered
-  )
-);
+// Apply the middleware to all callback query actions that require registration
+bot.on('callback_query', async (ctx, next) => {
+  // Answer the callback query to remove the loading state on the button
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    logger.warn('Failed to answer callback query in middleware', { error: err.message });
+  }
+  return ensureRegistered(ctx, next);
+});
 
 async function startBot() {
   // Always set up Express middleware and health check
