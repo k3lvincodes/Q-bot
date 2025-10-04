@@ -184,12 +184,10 @@ const ensureRegistered = async (ctx, next) => {
     ctx.session.firstName = user.fullName?.split(' ')[0] || user.fullName;
     ctx.session.admin = user.admin ? 'true' : 'false';
     logger.info('User found in database', { telegramId, email: user.email });
-    if (next) return next(); // User found, proceed
+    return next(); // User found, proceed
   } else {
     // User not found, start registration
     ctx.session.persistentUser = 'no';
-    ctx.session.email = null; // Ensure email is cleared
-    ctx.session.fullName = null; // Ensure fullName is cleared
     ctx.session.platform = 'telegram';
     ctx.session.step = 'collectFullName';
     logger.info('New user detected. Starting registration.', { telegramId });
