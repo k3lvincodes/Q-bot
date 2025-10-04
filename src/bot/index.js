@@ -3,7 +3,6 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
 import safeSession from '../middlewares/session.js';
-import { prisma } from '../db/client.js'; 
 import { showMainMenu, showSupportMenu } from '../utils/menu.js';
 import axios from 'axios';
 import fetch from 'node-fetch';
@@ -42,8 +41,14 @@ import {
   handleLiveSupport,
 } from './workflows/support.js';
 import subscriptionPrices, { planIdMap } from '../utils/subscription-prices.js';
+import { PrismaClient } from '@prisma/client';
 
 dotenv.config();
+
+// Conditionally initialize Prisma Client
+// For local dev, initialize globally. For production (Render), initialize inside startBot.
+const isProduction = process.env.RENDER === 'true';
+let prisma = isProduction ? null : new PrismaClient();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
@@ -1430,6 +1435,10 @@ bot.on('callback_query', async (ctx, next) => {
 });
 
 async function startBot() {
+  if (isProduction) {
+    prisma = new PrismaClient(); // Initialize for production
+  }
+
   // Always set up Express middleware and health check
   app.use(express.json());
   app.use(bodyParser.json());
