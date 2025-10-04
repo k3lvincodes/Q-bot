@@ -1,4 +1,4 @@
-import { Telegraf, Markup } from 'telegraf';
+import { Telegraf, Markup, Composer } from 'telegraf';
 import express from 'express';
 import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
@@ -168,12 +168,12 @@ function clearListingSession(ctx) {
 }
 
 // Ensure user is registered before proceeding with actions
-async function ensureRegistered(ctx, callback) {
+const ensureRegistered = async (ctx, next) => {
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
 
   if (ctx.session.persistentUser === 'yes' && ctx.session.email) {
-    return callback();
+    return next(); // User is registered, proceed to the next middleware
   }
 
   const user = await prisma.users.findUnique({ where: { userId: telegramId } });
@@ -181,23 +181,21 @@ async function ensureRegistered(ctx, callback) {
     ctx.session.persistentUser = 'yes';
     ctx.session.email = user.email;
     ctx.session.fullName = user.fullName;
-    ctx.session.firstName = user.fullName?.split(' ')[0] || '';
+    ctx.session.firstName = user.fullName?.split(' ')[0] || user.fullName;
     ctx.session.admin = user.admin ? 'true' : 'false';
     logger.info('User found in database', { telegramId, email: user.email });
-    return callback();
+    return next(); // User found, proceed
+  } else {
+    // User not found, start registration
+    ctx.session.persistentUser = 'no';
+    ctx.session.platform = 'telegram';
+    ctx.session.step = 'collectFullName';
+    logger.info('New user detected. Starting registration.', { telegramId });
+    await ctx.reply('Welcome to Q! To get started, please enter your full name:');
+    // If it's a callback query, answer it to remove the loading state
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(e => logger.warn('Failed to answer CB query in ensureRegistered', { error: e.message }));
   }
-
-  ctx.session.persistentUser = 'no';
-  ctx.session.platform = 'telegram';
-  ctx.session.step = 'collectFullName';
-  logger.info('Initialized new user session for action', { telegramId, session: { ...ctx.session } });
-  await ctx.reply('Welcome to Q! Please enter your full name to register:');
-  try {
-    await ctx.answerCbQuery();
-  } catch (err) {
-    logger.error('Failed to answer callback query in ensureRegistered', { error: err.message });
-  }
-}
+};
 
 // Handle /start to reset session and initiate registration
 bot.command('start', async (ctx) => {
@@ -582,13 +580,11 @@ bot.action('BROWSE', async (ctx) => {
   try {
     await ctx.answerCbQuery();
   } catch (err) {
-    logger.error('Failed to answer callback query in BROWSE', { error: err.message });
+    logger.warn('Failed to answer callback query in BROWSE', { error: err.message });
   }
-  await ensureRegistered(ctx, async () => {
-    await ctx.deleteMessage().catch(() => {});
-    clearListingSession(ctx);
-    return browseSubscriptionsWorkflow(ctx);
-  });
+  await ctx.deleteMessage().catch(() => {});
+  clearListingSession(ctx);
+  return browseSubscriptionsWorkflow(ctx);
 });
 
 bot.action(/^BROWSE_CAT_(.+)$/, async (ctx) => {
@@ -712,12 +708,10 @@ bot.action('BROWSE_SUBS', async (ctx) => {
   try {
     await ctx.answerCbQuery();
   } catch (err) {
-    logger.error('Failed to answer callback query in BROWSE_SUBS', { error: err.message });
+    logger.warn('Failed to answer callback query in BROWSE_SUBS', { error: err.message });
   }
-  await ensureRegistered(ctx, async () => {
-    await ctx.deleteMessage().catch(() => {});
-    return browseSubscriptionsWorkflow(ctx);
-  });
+  await ctx.deleteMessage().catch(() => {});
+  return browseSubscriptionsWorkflow(ctx);
 });
 
 bot.action('MY_SUBS', async (ctx) => {
@@ -911,14 +905,12 @@ bot.action('ADD_SUB', async (ctx) => {
     await ctx.deleteMessage().catch(() => {});
     return ctx.reply('❌ Access restricted to admins only.');
   }
-  await ensureRegistered(ctx, async () => {
-    await ctx.deleteMessage().catch(() => {});
-    clearListingSession(ctx);
-    return addSubscriptionWorkflow(ctx);
-  });
+  await ctx.deleteMessage().catch(() => {});
+  clearListingSession(ctx);
+  return addSubscriptionWorkflow(ctx);
 });
 
-bot.action('REQUEST_SUB', async (ctx) => {
+bot.action('REQUEST_SUB', async (ctx) => { // ensureRegistered is applied to this
   try {
     await ctx.answerCbQuery();
   } catch (err) {
@@ -1305,15 +1297,13 @@ bot.action('WALLET', async (ctx) => {
   }
   await ctx.deleteMessage().catch(() => {});
 
-  await ensureRegistered(ctx, async () => {
-    await ctx.reply(
-      'Wallet / Payments:',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('Payment History', 'PAYMENT_HISTORY')],
-        [Markup.button.callback('Back to Profile', 'PROFILE')],
-      ])
-    );
-  });
+  await ctx.reply(
+    'Wallet / Payments:',
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Payment History', 'PAYMENT_HISTORY')],
+      [Markup.button.callback('Back to Profile', 'PROFILE')],
+    ])
+  );
 });
 
 bot.action('PAYMENT_HISTORY', async (ctx) => {
@@ -1324,83 +1314,79 @@ bot.action('PAYMENT_HISTORY', async (ctx) => {
   }
   await ctx.deleteMessage().catch(() => {});
 
-  await ensureRegistered(ctx, async () => {
-    try {
-      const payments = await prisma.payment.findMany({
-        where: { userId: ctx.session.userId },
-        orderBy: { createdAt: 'desc' },
-        take: 10, // Limit to the last 10 payments for now
-      });
+  try {
+    const payments = await prisma.payment.findMany({
+      where: { userId: ctx.session.userId },
+      orderBy: { createdAt: 'desc' },
+      take: 10, // Limit to the last 10 payments for now
+    });
 
-      if (payments.length === 0) {
-        return ctx.reply(
-          'You have no payment history.',
-          Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]])
-        );
-      }
-
-      let historyMessage = '<b>Your Recent Payments:</b>\n\n';
-      payments.forEach((p) => {
-        historyMessage +=
-          `<b>Plan:</b> ${p.subPlan}\n` +
-          `<b>Amount:</b> ₦${p.amount}\n` +
-          `<b>Status:</b> ${p.status.charAt(0).toUpperCase() + p.status.slice(1).replace(/_/g, ' ')}\n` + // Format status
-          `<b>Date:</b> ${p.createdAt.toLocaleDateString()}\n` +
-          `<b>Ref:</b> ${p.reference}\n\n`;
-      });
-
-      await ctx.reply(historyMessage, {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]]),
-      });
-    } catch (error) {
-      logger.error('Error fetching payment history', { error: error.message, stack: error.stack });
-      await ctx.reply('❌ An error occurred while fetching your payment history.');
+    if (payments.length === 0) {
+      return ctx.reply(
+        'You have no payment history.',
+        Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]])
+      );
     }
-  });
+
+    let historyMessage = '<b>Your Recent Payments:</b>\n\n';
+    payments.forEach((p) => {
+      historyMessage +=
+        `<b>Plan:</b> ${p.subPlan}\n` +
+        `<b>Amount:</b> ₦${p.amount}\n` +
+        `<b>Status:</b> ${p.status.charAt(0).toUpperCase() + p.status.slice(1).replace(/_/g, ' ')}\n` + // Format status
+        `<b>Date:</b> ${p.createdAt.toLocaleDateString()}\n` +
+        `<b>Ref:</b> ${p.reference}\n\n`;
+    });
+
+    await ctx.reply(historyMessage, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]]),
+    });
+  } catch (error) {
+    logger.error('Error fetching payment history', { error: error.message, stack: error.stack });
+    await ctx.reply('❌ An error occurred while fetching your payment history.');
+  }
 });
 
 bot.action('VIEW_PERSONAL_INFO', async (ctx) => {
-  try {
+  try { // ensureRegistered is applied to this
     await ctx.answerCbQuery();
   } catch (err) {
     logger.error('Failed to answer callback query in VIEW_PERSONAL_INFO', { error: err.message });
   }
   await ctx.deleteMessage().catch(() => {});
 
-  await ensureRegistered(ctx, async () => {
-    try {
-      const user = await prisma.users.findUnique({
-        where: { userId: ctx.session.userId },
-      });
+  try {
+    const user = await prisma.users.findUnique({
+      where: { userId: ctx.session.userId },
+    });
 
-      if (!user) {
-        return ctx.reply('❌ Could not find your information. Please try registering again by typing /start.');
-      }
-
-      const userInfo =
-        `<b>Your Personal Information:</b>\n\n` +
-        `<b>Full Name:</b> ${user.fullName}\n` +
-        `<b>Email:</b> ${user.email}\n` +
-        `<b>User ID:</b> ${user.userId}\n` +
-        `<b>Platform:</b> ${user.platform}\n` +
-        `<b>Registered on:</b> ${user.createdAt.toDateString()}`;
-
-      await ctx.reply(userInfo, {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('Edit Name', 'EDIT_NAME'),
-            Markup.button.callback('Edit Email', 'EDIT_EMAIL'),
-          ],
-          [Markup.button.callback('Back', 'PROFILE')]
-        ]),
-      });
-    } catch (error) {
-      logger.error('Error fetching user info in VIEW_PERSONAL_INFO', { error: error.message, stack: error.stack });
-      await ctx.reply('❌ An error occurred while fetching your information.');
+    if (!user) {
+      return ctx.reply('❌ Could not find your information. Please try registering again by typing /start.');
     }
-  });
+
+    const userInfo =
+      `<b>Your Personal Information:</b>\n\n` +
+      `<b>Full Name:</b> ${user.fullName}\n` +
+      `<b>Email:</b> ${user.email}\n` +
+      `<b>User ID:</b> ${user.userId}\n` +
+      `<b>Platform:</b> ${user.platform}\n` +
+      `<b>Registered on:</b> ${user.createdAt.toDateString()}`;
+
+    await ctx.reply(userInfo, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback('Edit Name', 'EDIT_NAME'),
+          Markup.button.callback('Edit Email', 'EDIT_EMAIL'),
+        ],
+        [Markup.button.callback('Back', 'PROFILE')]
+      ]),
+    });
+  } catch (error) {
+    logger.error('Error fetching user info in VIEW_PERSONAL_INFO', { error: error.message, stack: error.stack });
+    await ctx.reply('❌ An error occurred while fetching your information.');
+  }
 });
 
 bot.action('EDIT_NAME', async (ctx) => {
@@ -1411,33 +1397,37 @@ bot.action('EDIT_NAME', async (ctx) => {
   }
   await ctx.deleteMessage().catch(() => {});
 
-  await ensureRegistered(ctx, async () => {
-    ctx.session.step = 'editFullName';
-    await ctx.reply('Please enter your new full name:', {
-      reply_markup: Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'VIEW_PERSONAL_INFO')]]).reply_markup
-    });
+  ctx.session.step = 'editFullName';
+  await ctx.reply('Please enter your new full name:', {
+    reply_markup: Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'VIEW_PERSONAL_INFO')]]).reply_markup
   });
 });
 
 bot.action('EDIT_EMAIL', async (ctx) => {
-  try {
+  try { // ensureRegistered is applied to this
     await ctx.answerCbQuery();
   } catch (err) {
     logger.error('Failed to answer callback query in EDIT_EMAIL', { error: err.message });
   }
   await ctx.deleteMessage().catch(() => {});
 
-  await ensureRegistered(ctx, async () => {
-    ctx.session.step = 'editEmail';
-    await ctx.reply('Please enter your new email address:', {
-      reply_markup: Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'VIEW_PERSONAL_INFO')]])
-        .reply_markup,
-    });
+  ctx.session.step = 'editEmail';
+  await ctx.reply('Please enter your new email address:', {
+    reply_markup: Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'VIEW_PERSONAL_INFO')]])
+      .reply_markup,
   });
 });
 
+// Apply the middleware to all actions that require registration
+bot.use(
+  Composer.optional(
+    (ctx) => ctx.callbackQuery,
+    ensureRegistered
+  )
+);
+
 async function startBot() {
-  if (process.env.RENDER === 'true') {
+  if (process.env.RENDER === 'true' && process.env.RENDER_EXTERNAL_URL) {
     // Production mode on Render
     const port = parseInt(process.env.PORT) || 3000;
     const domain = process.env.RENDER_EXTERNAL_URL;

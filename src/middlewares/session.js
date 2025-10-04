@@ -157,8 +157,6 @@ export default function safeSession() {
   return async (ctx, next) => {
     try {
       if (pool) {
-        // Test database connection
-        await pool.query('SELECT 1');
         // Use PostgreSQL session store
         await sessionMiddleware(ctx, async () => {
           if (!ctx.session) {
