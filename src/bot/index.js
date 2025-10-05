@@ -61,9 +61,10 @@ startCronJobs();
 
 // Global error handler for Telegraf
 bot.catch((err, ctx) => {
-  logger.error(`Unhandled error processing ${ctx.updateType}`, { error: err, update: ctx.update });
-  // You can also add a reply to the user here, if appropriate
-  // ctx.reply('An unexpected error occurred. Please try again later.').catch(e => logger.error('Failed to send error message to user', e));
+  logger.error(`Unhandled error processing ${ctx.updateType}`, { error: err.message, stack: err.stack, update: ctx.update });
+  ctx.reply('An unexpected error occurred. Our team has been notified. Please try again later.').catch(e => 
+    logger.error('Failed to send error message to user', { error: e.message })
+  );
 });
 
 // Function to generate a short subscription ID (e.g., Q_D00ZG)
@@ -118,12 +119,9 @@ bot.use(async (ctx, next) => {
 });
 
 function escapeMarkdownV2(text) {
-  if (!text) return 'N/A';
-  return text
-    .toString()
-    .replace(/[_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\]/g, '\\$1')
-    .replace(/([^\w\s\/])/g, '\\$1')
-    .replace(/(\\\\[_\*\[\]\(\)\~`>\#\+\-\=\|\{\}\.\!\\])/g, '$1');
+  if (text === null || typeof text === 'undefined') return 'N/A';
+  // This is a safer and more standard way to escape MarkdownV2 characters.
+  return text.toString().replace(/([_*\\~`>#+\-=|{}.!])/g, '\\$1');
 }
 export async function fetchWithRetry(url, options, retries = 3, delay = 1000) {
   for (let i = 0; i < retries; i++) {
@@ -188,7 +186,9 @@ const ensureRegistered = async (ctx, next) => {
     ctx.session.platform = 'telegram';
     ctx.session.step = 'collectFullName';
     logger.info('New user detected. Starting registration.', { telegramId });
-    await ctx.reply('Welcome to Q! To get started, please enter your full name:');
+    await ctx.reply('Welcome to Q! To get started, please enter your full name:').catch(e => {
+      logger.error('Failed to send registration prompt', { error: e.message, telegramId });
+    });
     // If it's a callback query, answer it to remove the loading state
     if (ctx.callbackQuery) await ctx.answerCbQuery().catch(e => logger.warn('Failed to answer CB query in ensureRegistered', { error: e.message }));
   }
@@ -221,7 +221,9 @@ bot.command('start', async (ctx) => {
 
   ctx.session.step = 'collectFullName';
   logger.info('Initialized new user session', { telegramId, session: { ...ctx.session } });
-  await ctx.reply(`Welcome to Q! Please enter your full name:`);
+  await ctx.reply(`Welcome to Q! Please enter your full name:`).catch(e => {
+    logger.error('Failed to send initial registration prompt', { error: e.message, telegramId });
+  });
 });
 
 // Handle cases where a user blocks the bot
@@ -236,339 +238,252 @@ bot.hears(/menu/i, async (ctx) => {
   return showMainMenu(ctx);
 });
 
+const handleRegistration = async (ctx) => {
+  const prisma = getPrisma();
+  const text = ctx.message.text;
+  const { userId, step } = ctx.session;
+
+  switch (step) {
+    case 'collectFullName':
+      if (!text.trim()) {
+        logger.warn('Empty full name input', { userId });
+        return ctx.reply('Please enter a valid full name.');
+      }
+      ctx.session.fullName = text.trim();
+      ctx.session.firstName = text.trim().split(' ')[0] || text.trim();
+      ctx.session.step = 'collectEmail';
+      logger.info('Advancing to collectEmail', { userId, fullName: ctx.session.fullName });
+      return ctx.reply('Great! Now enter your email:');
+
+    case 'collectEmail':
+      const email = text.trim().toLowerCase();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        logger.warn('Invalid email input', { userId, email });
+        return ctx.reply('❌ Invalid email. Try again:');
+      }
+      const existing = await prisma.users.findFirst({ where: { email } });
+      if (existing) {
+        logger.warn('Email already used', { userId, email });
+        return ctx.reply('❌ Email already used. Enter another one:');
+      }
+      ctx.session.email = email;
+      ctx.session.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+      ctx.session.step = 'verifyCode';
+      const payload = {
+        name: ctx.session.firstName,
+        email: ctx.session.email,
+        verification: ctx.session.verificationCode,
+      };
+      try {
+        await axios.post('https://hook.eu2.make.com/1rzify472wbi8lzbkazby3yyb7ot9rhp', payload);
+        logger.info('Verification email sent', { userId, email });
+      } catch (e) {
+        logger.error('Email webhook failed', { error: e.message, userId });
+        await ctx.reply('❌ Failed to send verification email. Please try again.');
+        ctx.session.step = null;
+        return showMainMenu(ctx);
+      }
+      return ctx.reply('✅ Enter the code sent to your email:');
+
+    case 'verifyCode':
+      if (text.trim() !== ctx.session.verificationCode) {
+        logger.warn('Incorrect verification code', { userId, input: text.trim() });
+        return ctx.reply('❌ Incorrect code. Please try again:');
+      }
+      try {
+        await prisma.users.create({
+          data: {
+            userId: ctx.session.userId,
+            fullName: ctx.session.fullName,
+            email: ctx.session.email,
+            platform: ctx.session.platform,
+            admin: false,
+            verified: false,
+          },
+        });
+        ctx.session.step = null;
+        ctx.session.persistentUser = 'yes';
+        logger.info('User registered', { userId, email: ctx.session.email });
+        await ctx.reply("✅ You're now registered!");
+        return showMainMenu(ctx);
+      } catch (err) {
+        logger.error('Failed to register user', { error: err.message, stack: err.stack, userId });
+        ctx.session.step = null;
+        await ctx.reply('❌ Error registering user. Please start over.');
+        return showMainMenu(ctx);
+      }
+
+    case 'editFullName':
+      const newFullName = text.trim();
+      if (newFullName.split(' ').length < 2) {
+        logger.warn('Invalid full name input for edit', { userId, input: newFullName });
+        return ctx.reply('❌ Please enter at least your first and last name.');
+      }
+      try {
+        await prisma.users.update({
+          where: { userId: ctx.session.userId },
+          data: { fullName: newFullName },
+        });
+        ctx.session.fullName = newFullName;
+        ctx.session.firstName = newFullName.split(' ')[0];
+        ctx.session.step = null;
+        await ctx.reply('✅ Your name has been updated successfully!');
+        return showMainMenu(ctx);
+      } catch (error) {
+        logger.error('Error updating user name', { error: error.message, stack: error.stack, userId });
+        return ctx.reply('❌ An error occurred while updating your name.');
+      }
+
+    case 'editEmail':
+      const newEmail = text.trim().toLowerCase();
+      const newEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!newEmailRegex.test(newEmail)) {
+        logger.warn('Invalid new email input', { userId, email: newEmail });
+        return ctx.reply('❌ Invalid email format. Please try again:');
+      }
+      try {
+        const existingUser = await prisma.users.findFirst({ where: { email: newEmail } });
+        if (existingUser) {
+          logger.warn('New email already in use', { userId, email: newEmail });
+          return ctx.reply('❌ This email is already in use. Please enter a different one:');
+        }
+        ctx.session.newEmail = newEmail;
+        ctx.session.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        ctx.session.step = 'verifyNewEmail';
+        const emailPayload = {
+          name: ctx.session.firstName,
+          email: newEmail,
+          verification: ctx.session.verificationCode,
+        };
+        await axios.post('https://hook.eu2.make.com/1rzify472wbi8lzbkazby3yyb7ot9rhp', emailPayload);
+        logger.info('Verification email sent for email change', { userId, newEmail });
+        return ctx.reply(`✅ A verification code has been sent to ${newEmail}. Please enter the code:`);
+      } catch (error) {
+        logger.error('Error during email edit process', { error: error.message, stack: error.stack, userId });
+        return ctx.reply('❌ An error occurred. Please try again.');
+      }
+
+    case 'verifyNewEmail':
+      if (text.trim() !== ctx.session.verificationCode) {
+        logger.warn('Incorrect new email verification code', { userId, input: text.trim() });
+        return ctx.reply('❌ Incorrect code. Please try again:');
+      }
+      const oldEmail = ctx.session.email;
+      const verifiedNewEmail = ctx.session.newEmail;
+      try {
+        const subscriptionsToUpdate = await prisma.subscription.findMany({ where: { crew: { has: oldEmail } } });
+        const updatePromises = subscriptionsToUpdate.map(sub => {
+          const newCrew = sub.crew.map(email => (email === oldEmail ? verifiedNewEmail : email));
+          return prisma.subscription.update({ where: { id: sub.id }, data: { crew: newCrew } });
+        });
+        const userUpdatePromise = prisma.users.update({ where: { userId: ctx.session.userId }, data: { email: verifiedNewEmail } });
+        await prisma.$transaction([...updatePromises, userUpdatePromise]);
+        ctx.session.email = verifiedNewEmail;
+        ctx.session.step = null;
+        ctx.session.newEmail = null;
+        ctx.session.verificationCode = null;
+        await ctx.reply('✅ Your email has been updated successfully!');
+        return showMainMenu(ctx);
+      } catch (error) {
+        logger.error('Error updating user email and crew memberships', { error: error.message, stack: error.stack, userId });
+        return ctx.reply('❌ An error occurred while updating your email.');
+      }
+    default:
+      return null;
+  }
+};
+
+const handleSubscriptionListing = async (ctx) => {
+  const text = ctx.message.text;
+  const { userId, step } = ctx.session;
+
+  switch (step) {
+    case 'enterSlot':
+      const slot = parseInt(text.trim());
+      if (isNaN(slot) || slot <= 0) {
+        logger.warn('Invalid slot input', { userId, input: text });
+        return ctx.reply('❌ Enter a valid number of slots.');
+      }
+      ctx.session.subSlot = slot;
+      ctx.session.step = 'shareType';
+      logger.info('Set shareType step', { userId, subSlot: slot });
+      return ctx.reply('How will you share access?', Markup.inlineKeyboard([
+        [Markup.button.callback('Login Details', 'SHARE_LOGIN')],
+        [Markup.button.callback('OTP (User contacts you on WhatsApp)', 'SHARE_OTP')],
+      ]));
+
+    case 'enterEmail':
+      ctx.session.subEmail = text.trim();
+      ctx.session.step = 'enterPassword';
+      logger.info('Set subEmail', { userId, subEmail: text.trim() });
+      return ctx.reply('Enter Subscription Login Password:');
+
+    case 'enterPassword':
+      ctx.session.subPassword = text.trim();
+      ctx.session.step = 'selectDuration';
+      logger.info('Set subPassword', { userId });
+      return handleDurationSelection(ctx);
+
+    case 'enterWhatsApp':
+      const number = text.trim();
+      if (!/^\+\d{10,15}$/.test(number)) {
+        logger.warn('Invalid WhatsApp number', { userId, input: number });
+        return ctx.reply('❌ Invalid WhatsApp number (e.g., +1234567890). Try again:');
+      }
+      ctx.session.subEmail = number;
+      ctx.session.subPassword = '';
+      ctx.session.whatsappNo = number;
+      ctx.session.step = 'selectDuration';
+      logger.info('Set WhatsApp number', { userId, whatsappNo: number });
+      return handleDurationSelection(ctx);
+
+    case 'updateSlots':
+      return handleUpdateSlots(ctx, text);
+
+    case 'updateDuration':
+      return handleUpdateDuration(ctx, text);
+
+    default:
+      return null;
+  }
+};
+
 bot.on('text', async (ctx, next) => {
   const prisma = getPrisma();
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
   const text = ctx.message.text;
-  logger.info('Received text input', { telegramId, text, step: ctx.session.step, session: { ...ctx.session } });
+  logger.info('Received text input', { telegramId, text, step: ctx.session.step });
 
-  // Handle registration steps
-  if (ctx.session.step === 'collectFullName') {
-    if (!text.trim()) {
-      logger.warn('Empty full name input', { telegramId });
-      return ctx.reply('Please enter a valid full name.');
-    }
-    ctx.session.fullName = text.trim();
-    ctx.session.firstName = text.trim().split(' ')[0] || text.trim();
-    ctx.session.step = 'collectEmail';
-    logger.info('Advancing to collectEmail', { telegramId, fullName: ctx.session.fullName, session: { ...ctx.session } });
-    return ctx.reply('Great! Now enter your email:');
-  }
+  // Prioritize registration and listing workflows
+  if (await handleRegistration(ctx)) return;
+  if (await handleSubscriptionListing(ctx)) return;
 
-  if (ctx.session.step === 'collectEmail') {
-    const email = text.trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      logger.warn('Invalid email input', { telegramId, email });
-      return ctx.reply('❌ Invalid email. Try again:');
-    }
-    const existing = await prisma.users.findFirst({ where: { email } });
-    if (existing) {
-      logger.warn('Email already used', { telegramId, email });
-      return ctx.reply('❌ Email already used. Enter another one:');
-    }
-    ctx.session.email = email;
-    ctx.session.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-    ctx.session.step = 'verifyCode';
-    const payload = {
-      name: ctx.session.firstName,
-      email: ctx.session.email,
-      verification: ctx.session.verificationCode,
-    };
-    try {
-      await axios.post('https://hook.eu2.make.com/1rzify472wbi8lzbkazby3yyb7ot9rhp', payload);
-      logger.info('Verification email sent', { telegramId, email });
-    } catch (e) {
-      logger.error('Email webhook failed', { error: e.message, telegramId });
-      await ctx.reply('❌ Failed to send verification email. Please try again.');
-      ctx.session.step = null;
-      return showMainMenu(ctx);
-    }
-    return ctx.reply('✅ Enter the code sent to your email:');
-  }
-
-  if (ctx.session.step === 'verifyCode') {
-    if (text.trim() !== ctx.session.verificationCode) {
-      logger.warn('Incorrect verification code', { telegramId, input: text.trim() });
-      return ctx.reply('❌ Incorrect code. Please try again:');
-    }
-    try {
-      await prisma.users.create({
-        data: {
-          userId: ctx.session.userId,
-          fullName: ctx.session.fullName,
-          email: ctx.session.email,
-          platform: ctx.session.platform,
-          admin: false,
-          verified: false, // Set verified to false for new users
-        },
-      });
-      ctx.session.step = null;
-      ctx.session.persistentUser = 'yes'; // Mark user as registered
-      logger.info('User registered', { telegramId, email: ctx.session.email });
-      await ctx.reply("✅ You're now registered!");
-      return showMainMenu(ctx);
-    } catch (err) {
-      logger.error('Failed to register user', { error: err.message, stack: err.stack, telegramId });
-      ctx.session.step = null;
-      await ctx.reply('❌ Error registering user. Please start over.');
-      return showMainMenu(ctx);
-    }
-  }
-
-  if (ctx.session.step === 'editFullName') {
-    const newFullName = text.trim();
-    if (newFullName.split(' ').length < 2) {
-      logger.warn('Invalid full name input for edit', { telegramId, input: newFullName });
-      return ctx.reply('❌ Please enter at least your first and last name.');
-    }
-
-    try {
-      await prisma.users.update({
-        where: { userId: ctx.session.userId },
-        data: { fullName: newFullName },
-      });
-      ctx.session.fullName = newFullName;
-      ctx.session.firstName = newFullName.split(' ')[0];
-      ctx.session.step = null;
-      await ctx.reply('✅ Your name has been updated successfully!');
-      return showMainMenu(ctx);
-    } catch (error) {
-      logger.error('Error updating user name', { error: error.message, stack: error.stack, telegramId });
-      return ctx.reply('❌ An error occurred while updating your name.');
-    }
-  }
-
-  if (ctx.session.step === 'editEmail') {
-    const newEmail = text.trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(newEmail)) {
-      logger.warn('Invalid new email input', { telegramId, email: newEmail });
-      return ctx.reply('❌ Invalid email format. Please try again:');
-    }
-
-    try {
-      const existing = await prisma.users.findFirst({ where: { email: newEmail } });
-      if (existing) {
-        logger.warn('New email already in use', { telegramId, email: newEmail });
-        return ctx.reply('❌ This email is already in use. Please enter a different one:');
-      }
-
-      ctx.session.newEmail = newEmail;
-      ctx.session.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-      ctx.session.step = 'verifyNewEmail';
-
-      const payload = {
-        name: ctx.session.firstName,
-        email: newEmail,
-        verification: ctx.session.verificationCode,
-      };
-
-      await axios.post('https://hook.eu2.make.com/1rzify472wbi8lzbkazby3yyb7ot9rhp', payload);
-      logger.info('Verification email sent for email change', { telegramId, newEmail });
-      return ctx.reply(`✅ A verification code has been sent to ${newEmail}. Please enter the code:`);
-    } catch (error) {
-      logger.error('Error during email edit process', { error: error.message, stack: error.stack, telegramId });
-      return ctx.reply('❌ An error occurred. Please try again.');
-    }
-  }
-
-  if (ctx.session.step === 'verifyNewEmail') {
-    if (text.trim() !== ctx.session.verificationCode) {
-      logger.warn('Incorrect new email verification code', { telegramId, input: text.trim() });
-      return ctx.reply('❌ Incorrect code. Please try again:');
-    }
-
-    const oldEmail = ctx.session.email;
-    const newEmail = ctx.session.newEmail;
-
-    try {
-      // Find all subscriptions where the user is a crew member with the old email
-      const subscriptionsToUpdate = await prisma.subscription.findMany({
-        where: {
-          crew: {
-            has: oldEmail,
-          },
-        },
-      });
-
-      // Create an array of update promises for the transaction
-      const updatePromises = subscriptionsToUpdate.map(sub => {
-        const newCrew = sub.crew.map(email => (email === oldEmail ? newEmail : email));
-        return prisma.subscription.update({
-          where: { id: sub.id },
-          data: { crew: newCrew },
-        });
-      });
-
-      // Add the user email update to the transaction
-      const userUpdatePromise = prisma.users.update({
-        where: { userId: ctx.session.userId },
-        data: { email: newEmail },
-      });
-
-      // Execute all updates in a single transaction
-      await prisma.$transaction([...updatePromises, userUpdatePromise]);
-
-      ctx.session.email = newEmail;
-      ctx.session.step = null;
-      ctx.session.newEmail = null;
-      ctx.session.verificationCode = null;
-      await ctx.reply('✅ Your email has been updated successfully!');
-      return showMainMenu(ctx);
-    } catch (error) {
-      logger.error('Error updating user email and crew memberships', { error: error.message, stack: error.stack, telegramId });
-      return ctx.reply('❌ An error occurred while updating your email.');
-    }
-  }
-
-  // Handle subscription-related steps
-  if (ctx.session.step === 'enterSlot') {
-    const slot = parseInt(text.trim());
-    if (isNaN(slot) || slot <= 0) {
-      logger.warn('Invalid slot input', { telegramId, input: text });
-      return ctx.reply('❌ Enter a valid number of slots.');
-    }
-    ctx.session.subSlot = slot;
-    ctx.session.step = 'shareType';
-    logger.info('Set shareType step', { telegramId, subSlot: slot });
-    return ctx.reply(
-      'How will you share access?',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('Login Details', 'SHARE_LOGIN')],
-        [Markup.button.callback('OTP (User contacts you on WhatsApp)', 'SHARE_OTP')],
-      ])
-    );
-  }
-
-  if (ctx.session.step === 'enterEmail') {
-    ctx.session.subEmail = text.trim();
-    ctx.session.step = 'enterPassword';
-    logger.info('Set subEmail', { telegramId, subEmail: text.trim() });
-    return ctx.reply('Enter Subscription Login Password:');
-  }
-
-  if (ctx.session.step === 'enterPassword') {
-    ctx.session.subPassword = text.trim();
-    ctx.session.step = 'selectDuration';
-    logger.info('Set subPassword', { telegramId });
-    return ctx.reply(
-      'Enter listing monthly duration (1–12):',
-      Markup.inlineKeyboard(
-        [...Array(12)].map((_, i) => [Markup.button.callback(`${i + 1}`, `DURATION_${i + 1}`)])
-      )
-    );
-  }
-
-  if (ctx.session.step === 'enterWhatsApp') {
-    const number = text.trim();
-    if (!/^\+\d{10,15}$/.test(number)) {
-      logger.warn('Invalid WhatsApp number', { telegramId, input: number });
-      return ctx.reply('❌ Invalid WhatsApp number (e.g., +1234567890). Try again:');
-    }
-    ctx.session.subEmail = number;
-    ctx.session.subPassword = '';
-    ctx.session.whatsappNo = number;
-    ctx.session.step = 'selectDuration';
-    logger.info('Set WhatsApp number', { telegramId, whatsappNo: number });
-    return ctx.reply(
-      'Enter duration (1–12):',
-      Markup.inlineKeyboard(
-        [...Array(12)].map((_, i) => [Markup.button.callback(`${i + 1}`, `DURATION_${i + 1}`)])
-      )
-    );
-  }
-
-  if (ctx.session.step === 'selectDuration') {
-    const duration = parseInt(text.trim());
-    if (isNaN(duration) || duration < 1 || duration > 12) {
-      logger.warn('Invalid duration input', { telegramId, input: text });
-      return ctx.reply('❌ Enter a valid duration (1–12). Try again:');
-    }
-    ctx.session.subDuration = duration;
-    ctx.session.subId = await generateShortSubId(); // Generate short subId
-    ctx.session.step = 'confirmSubscription';
-    logger.info('Set duration and subId', { telegramId, subDuration: duration, subId: ctx.session.subId });
-
-    const safe = (value) => (value ? value.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/&/g, '&amp;') : 'N/A');
-    const htmlMsg =
-      `<b>Confirm Subscription:</b>\n\n` +
-      `<b>Subscription:</b> ${safe(ctx.session.subPlan)}\n` +
-      `<b>Slots:</b> ${safe(ctx.session.subSlot)}\n` +
-      `<b>Duration:</b> ${safe(ctx.session.subDuration)} month(s)\n` +
-      `<b>Category:</b> ${safe(ctx.session.subCat)}\n` +
-      `<b>Subcategory:</b> ${safe(ctx.session.subSubCat)}\n` +
-      `<b>Monthly Amount:</b> ₦${safe(ctx.session.subAmount)}\n` +
-      `<b>Share Type:</b> ${safe(ctx.session.shareType)}\n` +
-      `<b>Login Email/WhatsApp:</b> ${safe(ctx.session.subEmail)}\n` +
-      `<b>Password:</b> ${safe(ctx.session.subPassword ? ctx.session.subPassword.slice(0, 3) + '****' : 'N/A')}\n`;
-
-    return ctx.reply(
-      htmlMsg,
-      {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [Markup.button.callback('Confirm', 'CONFIRM_SUBSCRIPTION')],
-            [Markup.button.callback('Cancel', 'CANCEL_SUBSCRIPTION')],
-          ],
-        },
-      }
-    );
-  }
-
-  if (ctx.session.step === 'updateSlots') {
-    return handleUpdateSlots(ctx, text);
-  }
-
-  if (ctx.session.step === 'updateDuration') {
-    return handleUpdateDuration(ctx, text);
-  }
-
-  // Check registration status before handling menu options
-  if (!ctx.session.step && !ctx.session.email) {
-    const user = await prisma.users.findUnique({ where: { userId: telegramId } });
-    if (user) {
-      ctx.session.persistentUser = 'yes';
-      ctx.session.email = user.email;
-      ctx.session.fullName = user.fullName;
-      ctx.session.firstName = user.fullName?.split(' ')[0] || '';
-      ctx.session.admin = user.admin ? 'true' : 'false';
-      logger.info('User found in database', { telegramId, email: user.email });
-      await ctx.reply(`Welcome back to Q, ${ctx.session.firstName}!`);
-      return showMainMenu(ctx);
-    } else {
-      ctx.session.persistentUser = 'no';
-      ctx.session.platform = 'telegram';
-      ctx.session.step = 'collectFullName';
-      logger.info('Initialized new user session', { telegramId, session: { ...ctx.session } });
-      await ctx.reply(`Welcome to Q! Please enter your full name:`);
+  // If not in a specific step, check for registration or handle as a menu command
+  if (!ctx.session.step) {
+    if (ctx.session.persistentUser !== 'yes') {
+      await ensureRegistered(ctx, next); // This will trigger registration if needed
       return;
     }
-  }
 
-  // Handle menu options only for registered users
-  if (ctx.session.persistentUser === 'yes' && ['Join Subscription', 'Add My Subscription', 'Wallet / Payments', 'Support & FAQs', 'Profile / Settings', 'Admin City (Admins only)'].includes(text)) {
-    clearListingSession(ctx);
-    switch (text) {
-      case 'Join Subscription':
-        return browseSubscriptionsWorkflow(ctx);
-      case 'My Subscriptions':
-        return mySubscriptionsWorkflow(ctx);
-      case 'Add My Subscription':
-        return addSubscriptionWorkflow(ctx);
-      case 'Wallet / Payments':
-        return ctx.reply('Wallet / Payments: Under construction.');
-      case 'Support & FAQs':
-        return showSupportMenu(ctx);
-      case 'Profile / Settings':
-        return ctx.reply('Profile / Settings: Under construction.');
-      case 'Admin City (Admins only)':
-        if (ctx.session.admin !== 'true') {
-          return ctx.reply('❌ Access restricted to admins only.');
-        }
-        return ctx.reply('Admin City: Under construction.');
+    // Handle menu options only for registered users
+    const menuOptions = ['Join Subscription', 'My Subscriptions', 'Add My Subscription', 'Wallet / Payments', 'Support & FAQs', 'Profile / Settings', 'Admin City (Admins only)'];
+    if (menuOptions.includes(text)) {
+      clearListingSession(ctx);
+      switch (text) {
+        case 'Join Subscription': return browseSubscriptionsWorkflow(ctx);
+        case 'My Subscriptions': return mySubscriptionsWorkflow(ctx);
+        case 'Add My Subscription': return addSubscriptionWorkflow(ctx);
+        case 'Wallet / Payments': return ctx.reply('Wallet / Payments: Under construction.');
+        case 'Support & FAQs': return showSupportMenu(ctx);
+        case 'Profile / Settings': return ctx.reply('Profile / Settings: Under construction.');
+        case 'Admin City (Admins only)':
+          if (ctx.session.admin !== 'true') {
+            return ctx.reply('❌ Access restricted to admins only.');
+          }
+          return ctx.reply('Admin City: Under construction.');
+      }
     }
   }
 
