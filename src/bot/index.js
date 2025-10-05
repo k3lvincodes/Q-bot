@@ -56,7 +56,6 @@ app.use((err, req, res, next) => {
   }
 });
 
-bot.use(safeSession());
 startCronJobs();
 
 // Global error handler for Telegraf
@@ -1344,8 +1343,11 @@ async function startBot() {
       const domain = process.env.RENDER_EXTERNAL_URL;
       const webhookPath = `/webhook`; // Using a simpler, explicit path
 
+      // Apply session middleware to Express app before the webhook handler
+      app.use(safeSession());
+
       // Use the telegraf webhook handler
-      app.use(bot.webhookCallback(webhookPath));
+      app.use(await bot.createWebhook({ domain, path: webhookPath }));
 
       // Start the server first
       app.listen(port, '0.0.0.0', async () => {
@@ -1354,7 +1356,6 @@ async function startBot() {
         await bot.telegram.setWebhook(`${domain}${webhookPath}`);
         logger.info(`Webhook set to ${domain}${webhookPath}`);
       });
-
     } catch (err) {
       logger.error('Failed to start bot in webhook mode', { error: err.message, stack: err.stack });
       process.exit(1);
@@ -1362,6 +1363,7 @@ async function startBot() {
   } else {
     // Development mode (long polling)
     logger.info('Starting bot in long-polling mode...');
+    bot.use(safeSession()); // Keep session for long-polling in dev
     await bot.launch();
     logger.info('Bot started successfully in development mode.');
   }
