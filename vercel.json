@@ -11,8 +11,5 @@
       "source": "/(.*)",
       "destination": "/src/bot/index.js"
     }
-  ],
-  "github": {
-    "silent": true
-  }
+  ]
 }
