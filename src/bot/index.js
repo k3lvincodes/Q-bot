@@ -1335,30 +1335,30 @@ async function startBot() {
   app.get('/health', (req, res) => {
     res.status(200).json({ status: 'ok' });
   });
-
+  
   if (process.env.RENDER === 'true' && process.env.RENDER_EXTERNAL_URL) { // Use strict check for 'true'
     // Production mode on Render
     try {
       const port = parseInt(process.env.PORT) || 3000;
       const domain = process.env.RENDER_EXTERNAL_URL;
-      const webhookPath = `/webhook`; // Using a simpler, explicit path
-
-      // Apply session middleware to Express app before the webhook handler
-      app.use(safeSession());
-
-      // Use the telegraf webhook handler
-      app.use(await bot.createWebhook({ domain, path: webhookPath }));
-
-      // Start the server first
-      app.listen(port, '0.0.0.0', async () => {
-        logger.info(`Express server listening on port ${port}`);
-        // Set the webhook only after the server is listening
-        await bot.telegram.setWebhook(`${domain}${webhookPath}`);
-        logger.info(`Webhook set to ${domain}${webhookPath}`);
+      const webhookPath = `/telegraf/webhook`; // A more descriptive path
+      
+      // Telegraf's launch method handles setting the webhook and the server.
+      // It also gracefully handles restarts without spamming the Telegram API.
+      bot.launch({
+        webhook: {
+          domain,
+          port,
+          path: webhookPath,
+          // We need to pass our existing express app instance.
+          cb: app
+        },
       });
-    } catch (err) {
-      logger.error('Failed to start bot in webhook mode', { error: err.message, stack: err.stack });
-      process.exit(1);
+      
+      logger.info(`Bot is running in webhook mode on ${domain}`);
+    } catch (error) {
+      logger.error('Failed to launch bot in webhook mode', { error: error.message, stack: error.stack });
+      process.exit(1); // Exit on failure to allow Render to restart
     }
   } else {
     // Development mode (long polling)
