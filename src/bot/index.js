@@ -56,6 +56,8 @@ app.use((err, req, res, next) => {
   }
 });
 
+// Apply session middleware globally. This is crucial for webhooks.
+bot.use(safeSession());
 startCronJobs();
 
 // Global error handler for Telegraf
@@ -1335,27 +1337,20 @@ async function startBot() {
   app.get('/health', (req, res) => {
     res.status(200).json({ status: 'ok' });
   });
-  
-  if (process.env.RENDER === 'true' && process.env.RENDER_EXTERNAL_URL) { // Use strict check for 'true'
-    // Production mode on Render
+
+  // Vercel environment variables
+  const isVercel = process.env.VERCEL === '1';
+  const domain = process.env.VERCEL_URL;
+
+  if (isVercel && domain) {
+    // Serverless mode for Vercel
     try {
-      const port = parseInt(process.env.PORT) || 3000;
-      const domain = process.env.RENDER_EXTERNAL_URL;
-      const webhookPath = `/telegraf/webhook`; // A more descriptive path
-      
-      // Telegraf's launch method handles setting the webhook and the server.
-      // It also gracefully handles restarts without spamming the Telegram API.
-      bot.launch({
-        webhook: {
-          domain,
-          port,
-          path: webhookPath,
-          // We need to pass our existing express app instance.
-          cb: app
-        },
-      });
-      
-      logger.info(`Bot is running in webhook mode on ${domain}`);
+      const secretPath = `/telegraf/${bot.secretPathComponent()}`;
+
+      // Use the webhook handler middleware. Vercel will run this for each request.
+      app.use(await bot.createWebhook({ domain, path: secretPath }));
+
+      logger.info(`Bot is configured for serverless webhook mode.`);
     } catch (error) {
       logger.error('Failed to launch bot in webhook mode', { error: error.message, stack: error.stack });
       process.exit(1); // Exit on failure to allow Render to restart
@@ -1363,10 +1358,12 @@ async function startBot() {
   } else {
     // Development mode (long polling)
     logger.info('Starting bot in long-polling mode...');
-    bot.use(safeSession()); // Keep session for long-polling in dev
     await bot.launch();
     logger.info('Bot started successfully in development mode.');
   }
 }
 
 startBot().catch((err) => logger.error('Failed to start bot', { error: err.message, stack: err.stack }));
+
+// Export the app for serverless environments
+export default app;

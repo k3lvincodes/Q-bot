@@ -7,11 +7,12 @@
   "scripts": {
     "dev": "nodemon src/bot/index.js",
     "start": "node --es-module-specifier-resolution=node --no-warnings src/bot/index.js",
-    "build": "prisma generate && prisma migrate deploy",
+    "build": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:push": "prisma db push --schema=prisma/schema.prisma",
-    "prisma:studio": "prisma studio --schema=prisma/schema.prisma"
+    "prisma:studio": "prisma studio --schema=prisma/schema.prisma",
+    "prisma:reset": "prisma migrate reset --force"
   },
   "keywords": [
     "telegram",
