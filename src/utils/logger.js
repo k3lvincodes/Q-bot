@@ -1,22 +1,30 @@
 import winston from 'winston';
 
-const logger = winston.createLogger({
-  level: 'debug', // Add debug level
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'logs/combined.log' }),
-  ],
-});
+const { combine, timestamp, printf, colorize } = winston.format;
 
+// Define the format for the console logs
+const consoleFormat = combine(
+  colorize(),
+  timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+  printf(({ level, message, timestamp }) => `${timestamp} ${level}: ${message}`)
+);
+
+const transports = [
+  new winston.transports.Console({
+    format: consoleFormat,
+  }),
+];
+
+// Only add file transports if not in a production environment
 if (process.env.NODE_ENV !== 'production') {
-  logger.add(new winston.transports.Console({
-    format: winston.format.simple(),
-    level: 'debug', // Add debug level for console
-  }));
+  transports.push(new winston.transports.File({ filename: 'logs/error.log', level: 'error' }));
+  transports.push(new winston.transports.File({ filename: 'logs/combined.log' }));
 }
+
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.json(),
+  transports: transports,
+});
 
 export default logger;
