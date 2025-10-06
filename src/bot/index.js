@@ -1338,23 +1338,34 @@ async function startBot() {
     res.status(200).json({ status: 'ok' });
   });
 
-  // Vercel environment variables
   const isVercel = process.env.VERCEL === '1';
-  const domain = process.env.VERCEL_URL;
 
-  if (isVercel && domain) {
+  if (isVercel) {
     // Serverless mode for Vercel
-    try {
-      const secretPath = `/telegraf/${bot.secretPathComponent()}`;
+    const domain = process.env.VERCEL_URL;
+    const secretPath = `/telegraf/${bot.secretPathComponent()}`;
 
-      // Use the webhook handler middleware. Vercel will run this for each request.
-      app.use(await bot.createWebhook({ domain, path: secretPath }));
+    // Use the webhook handler middleware for Telegram updates
+    app.use(bot.webhookCallback(secretPath));
 
-      logger.info(`Bot is configured for serverless webhook mode.`);
-    } catch (error) {
-      logger.error('Failed to launch bot in webhook mode', { error: error.message, stack: error.stack });
-      process.exit(1); // Exit on failure to allow Render to restart
-    }
+    // Endpoint to set the webhook
+    app.get('/api/set-webhook', async (req, res) => {
+      try {
+        await bot.telegram.setWebhook(`https://${domain}${secretPath}`);
+        logger.info(`Webhook set to https://${domain}${secretPath}`);
+        res.status(200).send('Webhook set successfully!');
+      } catch (error) {
+        logger.error('Failed to set webhook', { error: error.message });
+        res.status(500).send('Failed to set webhook');
+      }
+    });
+
+    // A simple landing page for the bot's URL
+    app.get('/', (req, res) => {
+      res.send('Hello! I am the Q Bot. Find me on Telegram.');
+    });
+
+    logger.info(`Bot is configured for serverless webhook mode on Vercel.`);
   } else {
     // Development mode (long polling)
     logger.info('Starting bot in long-polling mode...');
