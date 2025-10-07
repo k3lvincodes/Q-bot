@@ -1377,109 +1377,88 @@ async function startBot() {
 
   if (isVercel) {
     // Serverless mode for Vercel
-    const domain = process.env.VERCEL_URL;
-
-    if (!domain) {
-      logger.error('VERCEL_URL environment variable is not set');
-      process.exit(1);
-    }
-
-    // Remove protocol if present
-    const cleanDomain = domain.replace(/^https?:\/\//, '');
+    const domain = process.env.BOT_WEBHOOK_DOMAIN || "q-bot-ryp1.vercel.app";
     const webhookPath = `/webhook`;
-    const webhookUrl = `https://${cleanDomain}${webhookPath}`;
+    const webhookUrl = `https://${domain}${webhookPath}`;
 
-    // Set up webhook middleware
-    app.use(webhookPath, (req, res, next) => {
-      // Log webhook requests for debugging
-      logger.info('Webhook received', {
-        path: req.path,
-        method: req.method,
-        body: req.body
-      });
+    console.log('🔧 Setting webhook to:', webhookUrl);
+
+    // Webhook handler
+    app.post(webhookPath, (req, res, next) => {
+      console.log('📨 Webhook received:', req.body);
       next();
     });
 
-    app.use(webhookPath, bot.webhookCallback(webhookPath, { secretToken: process.env.SECRET_TOKEN }));
+    app.post(webhookPath, bot.webhookCallback(webhookPath));
 
     // Endpoint to set the webhook
     app.get('/api/set-webhook', async (req, res) => {
       try {
-        logger.info('Setting webhook', { url: webhookUrl });
-        const result = await bot.telegram.setWebhook(webhookUrl, { secret_token: process.env.SECRET_TOKEN });
-        logger.info('Webhook set successfully', { result });
+        console.log('🔄 Setting webhook to:', webhookUrl);
+
+        // Delete any existing webhook first
+        await bot.telegram.deleteWebhook();
+
+        // Set webhook to main domain
+        const result = await bot.telegram.setWebhook(webhookUrl, {
+          allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'],
+          drop_pending_updates: true
+        });
+
+        console.log('✅ Webhook set result:', result);
+
+        // Verify
+        const webhookInfo = await bot.telegram.getWebhookInfo();
+        console.log('🔍 Webhook info:', webhookInfo);
+
         res.status(200).json({
           success: true,
-          message: 'Webhook set successfully!',
-          webhookUrl
+          message: 'Webhook set!',
+          webhookUrl,
+          webhookInfo
         });
       } catch (error) {
-        logger.error('Failed to set webhook', { error: error.message, stack: error.stack });
+        console.error('❌ Webhook error:', error);
         res.status(500).json({
           success: false,
-          message: 'Failed to set webhook',
           error: error.message
         });
       }
     });
 
-    // Endpoint to get webhook info
+    // Get current webhook info
     app.get('/api/webhook-info', async (req, res) => {
       try {
         const info = await bot.telegram.getWebhookInfo();
-        res.status(200).json({ success: true, webhookInfo: info });
+        res.json({ success: true, webhookInfo: info });
       } catch (error) {
-        logger.error('Failed to get webhook info', { error: error.message });
-        res.status(500).json({
-          success: false,
-          message: 'Failed to get webhook info',
-          error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
       }
     });
 
-    // Delete webhook endpoint (for debugging)
+    // Delete webhook
     app.get('/api/delete-webhook', async (req, res) => {
       try {
         const result = await bot.telegram.deleteWebhook();
-        res.status(200).json({ success: true, message: 'Webhook deleted', result });
+        res.json({ success: true, result });
       } catch (error) {
-        logger.error('Failed to delete webhook', { error: error.message });
-        res.status(500).json({
-          success: false,
-          message: 'Failed to delete webhook',
-          error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
       }
     });
 
-    // A simple landing page for the bot's URL
-    app.get('/', (req, res) => {
-      res.send(`
-        <html>
-          <head><title>Q Bot</title></head>
-          <body>
-            <h1>Hello! I am the Q Bot.</h1>
-            <p>Find me on Telegram.</p>
-            <ul>
-              <li><a href="/health">Health Check</a></li>
-              <li><a href="/api/set-webhook">Set Webhook</a></li>
-              <li><a href="/api/webhook-info">Webhook Info</a></li>
-            </ul>
-          </body>
-        </html>
-      `);
-    });
-
-    logger.info(`Bot configured for Vercel. Webhook URL: ${webhookUrl}`);
-
+    console.log('🚀 Bot configured for Vercel with fixed domain');
+    
     // Set webhook on startup
     try {
-      logger.info('Attempting to set webhook on startup...');
-      await bot.telegram.setWebhook(webhookUrl, { secret_token: process.env.SECRET_TOKEN });
-      logger.info('Webhook set successfully on startup');
+      console.log('🔄 Setting webhook on startup...');
+      await bot.telegram.deleteWebhook();
+      await bot.telegram.setWebhook(webhookUrl, {
+        allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'],
+        drop_pending_updates: true
+      });
+      console.log('✅ Webhook set successfully on startup');
     } catch (error) {
-      logger.error('Failed to set webhook on startup', { error: error.message });
+      console.error('❌ Failed to set webhook on startup:', error.message);
     }
   } else {
     // Development mode (long polling)
