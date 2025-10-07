@@ -1331,10 +1331,17 @@ bot.on('callback_query', async (ctx, next) => {
 });
 
 async function startBot() {
-  logger.info('Starting bot in long-polling mode...');
-  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-  await bot.launch();
-  logger.info('Bot started successfully in long-polling mode.');
+  try {
+    logger.info('Starting bot in long-polling mode...');
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    await bot.launch();
+    logger.info('Bot started successfully in long-polling mode.');
+  } catch (error) {
+    logger.error('Failed to launch bot', { error: error.message, stack: error.stack });
+    // In a containerized environment, it's often better to exit on a fatal startup error
+    // to allow the orchestrator (like Render) to restart the service.
+    process.exit(1);
+  }
 }
 
 startBot().catch((err) => logger.error('Failed to start bot', { error: err.message, stack: err.stack }));
