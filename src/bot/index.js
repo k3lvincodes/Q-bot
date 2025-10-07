@@ -1400,13 +1400,13 @@ async function startBot() {
       next();
     });
 
-    app.use(webhookPath, bot.webhookCallback(webhookPath));
+    app.use(webhookPath, bot.webhookCallback(webhookPath, { secretToken: process.env.SECRET_TOKEN }));
 
     // Endpoint to set the webhook
     app.get('/api/set-webhook', async (req, res) => {
       try {
         logger.info('Setting webhook', { url: webhookUrl });
-        const result = await bot.telegram.setWebhook(webhookUrl);
+        const result = await bot.telegram.setWebhook(webhookUrl, { secret_token: process.env.SECRET_TOKEN });
         logger.info('Webhook set successfully', { result });
         res.status(200).json({
           success: true,
@@ -1476,7 +1476,7 @@ async function startBot() {
     // Set webhook on startup
     try {
       logger.info('Attempting to set webhook on startup...');
-      await bot.telegram.setWebhook(webhookUrl);
+      await bot.telegram.setWebhook(webhookUrl, { secret_token: process.env.SECRET_TOKEN });
       logger.info('Webhook set successfully on startup');
     } catch (error) {
       logger.error('Failed to set webhook on startup', { error: error.message });
