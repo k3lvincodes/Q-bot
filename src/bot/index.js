@@ -1331,144 +1331,15 @@ bot.on('callback_query', async (ctx, next) => {
 });
 
 async function startBot() {
-  // Always set up Express middleware and health check
-  app.use(express.json());
-  app.use(bodyParser.json());
-
-  app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
-
-  // Add this with your other Express routes
-  app.get('/api/test-db', async (req, res) => {
-    try {
-      const prisma = getPrisma();
-      // Simple query to test connection
-      const result = await prisma.$queryRaw`SELECT 1 as test`;
-      res.json({
-        status: 'success',
-        database: 'connected',
-        result
-      });
-    } catch (error) {
-      res.status(500).json({
-        status: 'error',
-        database: 'failed',
-        error: error.message
-      });
-    }
-  });
-
-  app.get('/api/debug', (req, res) => {
-    res.json({
-      status: 'ok',
-      timestamp: new Date().toISOString(),
-      environment: {
-        VERCEL: process.env.VERCEL,
-        NODE_ENV: process.env.NODE_ENV,
-        HAS_BOT_TOKEN: !!process.env.BOT_TOKEN,
-        HAS_DATABASE_URL: !!process.env.DATABASE_URL,
-        DATABASE_URL_LENGTH: process.env.DATABASE_URL ? process.env.DATABASE_URL.length : 0
-      }
-    });
-  });
-
-  const isVercel = process.env.VERCEL === '1';
-
-  if (isVercel) {
-    // Serverless mode for Vercel
-    const domain = process.env.BOT_WEBHOOK_DOMAIN || "q-bot-ryp1.vercel.app";
-    const webhookPath = `/webhook`;
-    const webhookUrl = `https://${domain}${webhookPath}`;
-
-    console.log('🔧 Setting webhook to:', webhookUrl);
-
-    // Webhook handler
-    app.post(webhookPath, (req, res, next) => {
-      console.log('📨 Webhook received:', req.body);
-      next();
-    });
-
-    app.post(webhookPath, bot.webhookCallback(webhookPath));
-
-    // Endpoint to set the webhook
-    app.get('/api/set-webhook', async (req, res) => {
-      try {
-        console.log('🔄 Setting webhook to:', webhookUrl);
-
-        // Delete any existing webhook first
-        await bot.telegram.deleteWebhook();
-
-        // Set webhook to main domain
-        const result = await bot.telegram.setWebhook(webhookUrl, {
-          allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'],
-          drop_pending_updates: true
-        });
-
-        console.log('✅ Webhook set result:', result);
-
-        // Verify
-        const webhookInfo = await bot.telegram.getWebhookInfo();
-        console.log('🔍 Webhook info:', webhookInfo);
-
-        res.status(200).json({
-          success: true,
-          message: 'Webhook set!',
-          webhookUrl,
-          webhookInfo
-        });
-      } catch (error) {
-        console.error('❌ Webhook error:', error);
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
-      }
-    });
-
-    // Get current webhook info
-    app.get('/api/webhook-info', async (req, res) => {
-      try {
-        const info = await bot.telegram.getWebhookInfo();
-        res.json({ success: true, webhookInfo: info });
-      } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-
-    // Delete webhook
-    app.get('/api/delete-webhook', async (req, res) => {
-      try {
-        const result = await bot.telegram.deleteWebhook();
-        res.json({ success: true, result });
-      } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-
-    console.log('🚀 Bot configured for Vercel with fixed domain');
-    
-    // Set webhook on startup
-    try {
-      console.log('🔄 Setting webhook on startup...');
-      await bot.telegram.deleteWebhook();
-      await bot.telegram.setWebhook(webhookUrl, {
-        allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'],
-        drop_pending_updates: true
-      });
-      console.log('✅ Webhook set successfully on startup');
-    } catch (error) {
-      console.error('❌ Failed to set webhook on startup:', error.message);
-    }
-  } else {
-    // Development mode (long polling)
-    logger.info('Starting bot in long-polling mode...');
-    await bot.launch();
-    logger.info('Bot started successfully in development mode.');
-  }
+  logger.info('Starting bot in long-polling mode...');
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  await bot.launch();
+  logger.info('Bot started successfully in long-polling mode.');
 }
 
 startBot().catch((err) => logger.error('Failed to start bot', { error: err.message, stack: err.stack }));
 
 // Export the app for serverless environments
-export default app;
+// This is no longer strictly necessary if you are not using a serverless environment
+// that requires an exported http handler.
+// export default app;
