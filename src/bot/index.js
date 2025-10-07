@@ -1448,6 +1448,40 @@ async function startBot() {
       logger.error('Failed to set webhook on startup', { error: error.message });
     }
   } else {
+    // Add this with your other Express routes
+    app.get('/api/test-db', async (req, res) => {
+      try {
+        const prisma = getPrisma();
+        // Simple query to test connection
+        const result = await prisma.$queryRaw`SELECT 1 as test`;
+        res.json({
+          status: 'success',
+          database: 'connected',
+          result
+        });
+      } catch (error) {
+        res.status(500).json({
+          status: 'error',
+          database: 'failed',
+          error: error.message
+        });
+      }
+    });
+
+    app.get('/api/debug', (req, res) => {
+      res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        environment: {
+          VERCEL: process.env.VERCEL,
+          NODE_ENV: process.env.NODE_ENV,
+          HAS_BOT_TOKEN: !!process.env.BOT_TOKEN,
+          HAS_DATABASE_URL: !!process.env.DATABASE_URL,
+          DATABASE_URL_LENGTH: process.env.DATABASE_URL ? process.env.DATABASE_URL.length : 0
+        }
+      });
+    });
+
     // Development mode (long polling)
     logger.info('Starting bot in long-polling mode...');
     await bot.launch();
