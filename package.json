@@ -7,13 +7,13 @@
   "scripts": {
     "dev": "nodemon src/bot/index.js",
     "start": "node --es-module-specifier-resolution=node --no-warnings src/bot/index.js",
-    "build": "prisma generate && prisma db push",
+    "build": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:push": "prisma db push --schema=prisma/schema.prisma",
-    "prisma:studio": "prisma studio --schema=prisma/schema.prisma",
+    "prisma:push": "prisma db push",
+    "prisma:studio": "prisma studio",
     "prisma:reset": "prisma migrate reset --force",
-    "vercel-build": "prisma generate && prisma db push"
+    "render-build": "prisma generate"
   },
   "keywords": [
     "telegram",

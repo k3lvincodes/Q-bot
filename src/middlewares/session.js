@@ -1,10 +1,9 @@
 import { session } from 'telegraf';
 import logger from '../utils/logger.js';
 
-// Simple in-memory session store for fallback
+// Simple in-memory session store (no database dependencies)
 const memoryStore = new Map();
 
-// Session middleware with PostgreSQL store
 const sessionMiddleware = session({
   store: {
     async get(key) {
@@ -17,7 +16,7 @@ const sessionMiddleware = session({
       memoryStore.delete(key);
     },
   },
-  
+
   getSessionKey: (ctx) => {
     if (ctx.from && ctx.chat) {
       return `${ctx.from.id}:${ctx.chat.id}`;
@@ -30,19 +29,5 @@ const sessionMiddleware = session({
 });
 
 export default function safeSession() {
-  return async (ctx, next) => {
-    try {
-      await sessionMiddleware(ctx, next);
-    } catch (err) {
-      logger.error('Session middleware error', { 
-        error: err.message
-      });
-
-      // Fallback to basic session
-      if (!ctx.session) {
-        ctx.session = {};
-      }
-      await next();
-    }
-  };
+  return sessionMiddleware;
 }

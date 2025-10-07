@@ -56,6 +56,21 @@ app.use((err, req, res, next) => {
   }
 });
 
+// Health check endpoint (REQUIRED for Render)
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    service: 'q-bot'
+  });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.send('Q Bot is running with polling mode!');
+});
+
+
 // Apply session middleware globally. This is crucial for webhooks.
 bot.use(safeSession());
 startCronJobs();
@@ -1332,25 +1347,45 @@ bot.on('callback_query', async (ctx, next) => {
 
 async function startBot() {
   try {
-    logger.info('Starting bot in long-polling mode...');
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    logger.info('🚀 Starting bot in polling mode...');
+
+    // Start Express server FIRST (critical for Render)
+    const PORT = process.env.PORT || 3000;
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      logger.info(`🌐 Express server running on port ${PORT}`);
+    });
+
+    // Delete any existing webhook
+    await bot.telegram.deleteWebhook();
+
+    // Start bot polling
     await bot.launch();
-    logger.info('Bot started successfully in long-polling mode.');
+
+    logger.info('✅ Bot started successfully in polling mode!');
+
+    // Graceful shutdown
+    const gracefulShutdown = () => {
+      logger.info('🛑 Shutting down gracefully...');
+      server.close(() => {
+        bot.stop();
+        process.exit(0);
+      });
+    };
+
+    process.on('SIGTERM', gracefulShutdown);
+    process.on('SIGINT', gracefulShutdown);
+
   } catch (error) {
-    logger.error('Failed to launch bot', { error: error.message, stack: error.stack });
-    // In a containerized environment, it's often better to exit on a fatal startup error
-    // to allow the orchestrator (like Render) to restart the service.
+    logger.error('❌ Failed to start bot', { error: error.message });
+
+    // Handle the 409 conflict error
+    if (error.message.includes('409: Conflict')) {
+      logger.info('🔄 Bot conflict detected. This usually means another instance is running.');
+      logger.info('💡 Try stopping all deployments and redeploying fresh.');
+    }
+
     process.exit(1);
   }
 }
 
-startBot().catch((err) => logger.error('Failed to start bot', { error: err.message, stack: err.stack }));
-
-// Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-// Export the app for serverless environments
-// This is no longer strictly necessary if you are not using a serverless environment
-// that requires an exported http handler.
-// export default app;
+startBot();
