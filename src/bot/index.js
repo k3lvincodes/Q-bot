@@ -1438,6 +1438,15 @@ async function startBot() {
     });
 
     logger.info(`Bot configured for Vercel. Webhook URL: ${webhookUrl}`);
+
+    // Set webhook on startup
+    try {
+      logger.info('Attempting to set webhook on startup...');
+      await bot.telegram.setWebhook(webhookUrl);
+      logger.info('Webhook set successfully on startup');
+    } catch (error) {
+      logger.error('Failed to set webhook on startup', { error: error.message });
+    }
   } else {
     // Development mode (long polling)
     logger.info('Starting bot in long-polling mode...');
