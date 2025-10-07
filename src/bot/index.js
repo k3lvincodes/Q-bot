@@ -1346,6 +1346,10 @@ async function startBot() {
 
 startBot().catch((err) => logger.error('Failed to start bot', { error: err.message, stack: err.stack }));
 
+// Enable graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 // Export the app for serverless environments
 // This is no longer strictly necessary if you are not using a serverless environment
 // that requires an exported http handler.
