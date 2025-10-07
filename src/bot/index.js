@@ -1334,8 +1334,9 @@ async function startBot() {
   // Always set up Express middleware and health check
   app.use(express.json());
   app.use(bodyParser.json());
+
   app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
   const isVercel = process.env.VERCEL === '1';
@@ -1343,29 +1344,100 @@ async function startBot() {
   if (isVercel) {
     // Serverless mode for Vercel
     const domain = process.env.VERCEL_URL;
-    const secretPath = `/telegraf/${bot.secretPathComponent()}`;
 
-    // Use the webhook handler middleware for Telegram updates
-    app.use(bot.webhookCallback(secretPath));
+    if (!domain) {
+      logger.error('VERCEL_URL environment variable is not set');
+      process.exit(1);
+    }
+
+    // Remove protocol if present
+    const cleanDomain = domain.replace(/^https?:\/\//, '');
+    const webhookPath = `/webhook`;
+    const webhookUrl = `https://${cleanDomain}${webhookPath}`;
+
+    // Set up webhook middleware
+    app.use(webhookPath, (req, res, next) => {
+      // Log webhook requests for debugging
+      logger.info('Webhook received', {
+        path: req.path,
+        method: req.method,
+        body: req.body
+      });
+      next();
+    });
+
+    app.use(webhookPath, bot.webhookCallback(webhookPath));
 
     // Endpoint to set the webhook
     app.get('/api/set-webhook', async (req, res) => {
       try {
-        await bot.telegram.setWebhook(`https://${domain}${secretPath}`);
-        logger.info(`Webhook set to https://${domain}${secretPath}`);
-        res.status(200).send('Webhook set successfully!');
+        logger.info('Setting webhook', { url: webhookUrl });
+        const result = await bot.telegram.setWebhook(webhookUrl);
+        logger.info('Webhook set successfully', { result });
+        res.status(200).json({
+          success: true,
+          message: 'Webhook set successfully!',
+          webhookUrl
+        });
       } catch (error) {
-        logger.error('Failed to set webhook', { error: error.message });
-        res.status(500).send('Failed to set webhook');
+        logger.error('Failed to set webhook', { error: error.message, stack: error.stack });
+        res.status(500).json({
+          success: false,
+          message: 'Failed to set webhook',
+          error: error.message
+        });
+      }
+    });
+
+    // Endpoint to get webhook info
+    app.get('/api/webhook-info', async (req, res) => {
+      try {
+        const info = await bot.telegram.getWebhookInfo();
+        res.status(200).json({ success: true, webhookInfo: info });
+      } catch (error) {
+        logger.error('Failed to get webhook info', { error: error.message });
+        res.status(500).json({
+          success: false,
+          message: 'Failed to get webhook info',
+          error: error.message
+        });
+      }
+    });
+
+    // Delete webhook endpoint (for debugging)
+    app.get('/api/delete-webhook', async (req, res) => {
+      try {
+        const result = await bot.telegram.deleteWebhook();
+        res.status(200).json({ success: true, message: 'Webhook deleted', result });
+      } catch (error) {
+        logger.error('Failed to delete webhook', { error: error.message });
+        res.status(500).json({
+          success: false,
+          message: 'Failed to delete webhook',
+          error: error.message
+        });
       }
     });
 
     // A simple landing page for the bot's URL
     app.get('/', (req, res) => {
-      res.send('Hello! I am the Q Bot. Find me on Telegram.');
+      res.send(`
+        <html>
+          <head><title>Q Bot</title></head>
+          <body>
+            <h1>Hello! I am the Q Bot.</h1>
+            <p>Find me on Telegram.</p>
+            <ul>
+              <li><a href="/health">Health Check</a></li>
+              <li><a href="/api/set-webhook">Set Webhook</a></li>
+              <li><a href="/api/webhook-info">Webhook Info</a></li>
+            </ul>
+          </body>
+        </html>
+      `);
     });
 
-    logger.info(`Bot is configured for serverless webhook mode on Vercel.`);
+    logger.info(`Bot configured for Vercel. Webhook URL: ${webhookUrl}`);
   } else {
     // Development mode (long polling)
     logger.info('Starting bot in long-polling mode...');

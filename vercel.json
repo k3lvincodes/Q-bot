@@ -6,10 +6,30 @@
       "use": "@vercel/node"
     }
   ],
-  "rewrites": [
+  "routes": [
     {
-      "source": "/(.*)",
-      "destination": "/src/bot/index.js"
+      "src": "/webhook",
+      "dest": "/src/bot/index.js",
+      "methods": ["POST"]
+    },
+    {
+      "src": "/api/set-webhook",
+      "dest": "/src/bot/index.js",
+      "methods": ["GET"]
+    },
+    {
+      "src": "/health",
+      "dest": "/src/bot/index.js",
+      "methods": ["GET"]
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/src/bot/index.js"
     }
-  ]
+  ],
+  "functions": {
+    "src/bot/index.js": {
+      "maxDuration": 30
+    }
+  }
 }
