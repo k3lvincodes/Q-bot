@@ -46,7 +46,10 @@ import { getPrisma } from '../db/client.js';
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const secretPathComponent = `telegraf/${bot.secretPathComponent()}`;
+
 const app = express();
+app.use(bodyParser.json());
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -67,7 +70,7 @@ app.get('/health', (req, res) => {
 
 // Root endpoint
 app.get('/', (req, res) => {
-  res.send('Q Bot is running with polling mode!');
+  res.send('Q Bot is running in webhook mode!');
 });
 
 
@@ -1345,45 +1348,44 @@ bot.on('callback_query', async (ctx, next) => {
   return await ensureRegistered(ctx, next);
 });
 
+// Set up the webhook handler
+app.use(await bot.createWebhook({ domain: process.env.WEBHOOK_DOMAIN, path: `/${secretPathComponent}` }));
+
 async function startBot() {
   try {
-    logger.info('🚀 Starting bot in polling mode...');
-
-    // Start Express server FIRST (critical for Render)
     const PORT = process.env.PORT || 3000;
+    const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
+
+    if (!WEBHOOK_DOMAIN) {
+      throw new Error('WEBHOOK_DOMAIN environment variable is not set.');
+    }
+
+    logger.info('🚀 Starting bot in webhook mode...');
+
+    // Set the webhook for Telegram
+    const webhookUrl = `https://${WEBHOOK_DOMAIN}/${secretPathComponent}`;
+    await bot.telegram.setWebhook(webhookUrl);
+    logger.info(`✅ Webhook set to ${webhookUrl}`);
+
+    // Start the Express server
     const server = app.listen(PORT, '0.0.0.0', () => {
       logger.info(`🌐 Express server running on port ${PORT}`);
+      logger.info('✅ Bot started successfully in webhook mode!');
     });
-
-    // Delete any existing webhook
-    await bot.telegram.deleteWebhook();
-
-    // Start bot polling
-    await bot.launch();
-
-    logger.info('✅ Bot started successfully in polling mode!');
 
     // Graceful shutdown
     const gracefulShutdown = () => {
       logger.info('🛑 Shutting down gracefully...');
       server.close(() => {
-        bot.stop();
+        logger.info('✅ Express server closed.');
         process.exit(0);
       });
     };
 
     process.on('SIGTERM', gracefulShutdown);
     process.on('SIGINT', gracefulShutdown);
-
   } catch (error) {
     logger.error('❌ Failed to start bot', { error: error.message });
-
-    // Handle the 409 conflict error
-    if (error.message.includes('409: Conflict')) {
-      logger.info('🔄 Bot conflict detected. This usually means another instance is running.');
-      logger.info('💡 Try stopping all deployments and redeploying fresh.');
-    }
-
     process.exit(1);
   }
 }
