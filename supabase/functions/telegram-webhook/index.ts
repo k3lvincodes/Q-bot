@@ -23,8 +23,11 @@ serve(async (req) => {
 
         // 2. Verify the request is from Telegram
         if (req.headers.get('x-telegram-bot-api-secret-token') !== TELEGRAM_SECRET) {
-            console.warn('Invalid secret token received');
-            return new Response('not allowed', { status: 403 });
+            console.warn('Invalid secret token received.');
+            console.log(`Expected: ${TELEGRAM_SECRET}`);
+            console.log(`Received: ${req.headers.get('x-telegram-bot-api-secret-token')}`);
+            // Return 200 to prevent Telegram from retrying and disabling the webhook
+            return new Response('ok');
         }
 
         // 3. Check content type
@@ -37,23 +40,22 @@ serve(async (req) => {
         const body = await req.json();
 
         // 5. Forward the request (now with better error handling)
-        try {
-            const forwardResponse = await fetch(FORWARD_URL, {
-                method: 'POST',
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Telegram-Webhook-Forwarder/1.0'
-                },
-                body: JSON.stringify(body),
-            });
-
-            if (!forwardResponse.ok) {
-                console.error(`Forward request failed: ${forwardResponse.status}`);
+        // We don't await this. This is "fire-and-forget".
+        // We respond to Telegram immediately and let the forwarding happen in the background.
+        fetch(FORWARD_URL, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'User-Agent': 'Telegram-Webhook-Forwarder/1.0'
+            },
+            body: JSON.stringify(body),
+        }).then(response => {
+            if (!response.ok) {
+                console.error(`Forward request failed with status: ${response.status}`);
             }
-        } catch (fetchError) {
+        }).catch(fetchError => {
             console.error('Error forwarding webhook:', fetchError);
-            // Continue - we still want to respond to Telegram
-        }
+        });
 
         // 6. Respond to Telegram immediately
         return new Response('ok', {
