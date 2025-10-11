@@ -1088,32 +1088,50 @@ app.use(bot.webhookCallback(`/${secretPathComponent}`));
 
 async function startBot() {
   try {
-    const PORT = process.env.PORT || 3000;
-    const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
+    if (process.env.NODE_ENV === 'production') {
+      // --- PRODUCTION (WEBHOOK) MODE ---
+      const PORT = process.env.PORT || 3000;
+      const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 
-    if (!WEBHOOK_DOMAIN) {
-      throw new Error('WEBHOOK_DOMAIN environment variable is not set.');
-    }
+      if (!WEBHOOK_DOMAIN) {
+        throw new Error('WEBHOOK_DOMAIN environment variable is not set for production.');
+      }
 
-    logger.info('🚀 Starting bot in webhook mode...');
+      logger.info('🚀 Starting bot in webhook mode...');
 
-    // Start the Express server
-    const server = app.listen(PORT, '0.0.0.0', () => {
-      logger.info(`🌐 Express server running on port ${PORT}`);
-      logger.info('✅ Bot started successfully in webhook mode!');
-    });
-
-    // Graceful shutdown
-    const gracefulShutdown = () => {
-      logger.info('🛑 Shutting down gracefully...');
-      server.close(() => {
-        logger.info('✅ Express server closed.');
-        process.exit(0);
+      // Start the Express server to listen for webhooks
+      const server = app.listen(PORT, '0.0.0.0', () => {
+        logger.info(`🌐 Express server running on port ${PORT}`);
+        logger.info('✅ Bot started successfully in webhook mode!');
       });
-    };
 
-    process.on('SIGTERM', gracefulShutdown);
-    process.on('SIGINT', gracefulShutdown);
+      // Graceful shutdown
+      const gracefulShutdown = () => {
+        logger.info('🛑 Shutting down gracefully...');
+        server.close(() => {
+          logger.info('✅ Express server closed.');
+          process.exit(0);
+        });
+      };
+
+      process.on('SIGTERM', gracefulShutdown);
+      process.on('SIGINT', gracefulShutdown);
+    } else {
+      // --- DEVELOPMENT (POLLING) MODE ---
+      logger.info('🚀 Starting bot in polling mode for development...');
+
+      // Delete any existing webhook to ensure polling works
+      await bot.telegram.deleteWebhook();
+
+      // Launch the bot using long polling
+      await bot.launch();
+
+      logger.info('✅ Bot started successfully in polling mode!');
+
+      // Graceful shutdown for polling
+      process.once('SIGINT', () => bot.stop('SIGINT'));
+      process.once('SIGTERM', () => bot.stop('SIGTERM'));
+    }
   } catch (error) {
     logger.error('❌ Failed to start bot', { error: error.message });
     process.exit(1);
