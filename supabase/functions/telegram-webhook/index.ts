@@ -11,8 +11,8 @@ for (const envVar of requiredEnv) {
   }
 }
 
-const TELEGRAM_SECRET = Deno.env.get('TELEGRAM_SECRET')!;
-const FORWARD_URL = Deno.env.get('FORWARD_URL')!;
+const TELEGRAM_SECRET = Deno.env.get('TELEGRAM_SECRET') || Deno.env.get('SUPABASE_AUTH_TELEGRAM_SECRET')!;
+const FORWARD_URL = Deno.env.get('FORWARD_URL') || Deno.env.get('SUPABASE_AUTH_FORWARD_URL')!;
 
 // --- EDGE FUNCTION MAIN HANDLER ---
 // This function is executed for every incoming request to the function's URL.
