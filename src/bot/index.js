@@ -481,6 +481,19 @@ bot.on('text', async (ctx, next) => {
   });
 });
 
+// Apply middleware to all callback queries. This runs BEFORE specific action handlers.
+bot.on('callback_query', async (ctx, next) => {
+  // 1. Answer the callback query to remove the loading state on the button.
+  try {
+    await ctx.answerCbQuery();
+  } catch (err) {
+    // This can happen if the action takes too long. It's usually safe to ignore.
+    logger.warn('Failed to answer callback query in global middleware', { error: err.message });
+  }
+  // 2. Ensure the user is registered before proceeding to the action handler.
+  return ensureRegistered(ctx, next);
+});
+
 bot.action('BROWSE', async (ctx) => {
   await ctx.deleteMessage().catch(() => {});
   clearListingSession(ctx);
@@ -1068,17 +1081,6 @@ bot.action('EDIT_EMAIL', async (ctx) => {
     reply_markup: Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'VIEW_PERSONAL_INFO')]])
       .reply_markup,
   });
-});
-
-// Apply the middleware to all callback query actions that require registration
-bot.on('callback_query', async (ctx, next) => {
-  // Answer the callback query to remove the loading state on the button
-  try {
-    await ctx.answerCbQuery();
-  } catch (err) {
-    logger.warn('Failed to answer callback query in middleware', { error: err.message });
-  }
-  return await ensureRegistered(ctx, next);
 });
 
 // Set up the webhook handler
