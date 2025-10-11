@@ -29,8 +29,9 @@ serve(async (req) => {
 
     // 3. Forward the request to the main Node.js bot application
     // We don't `await` this, because Telegram has a short timeout.
-    // We want to respond to Telegram immediately and let the forwarding happen in the background.
-    fetch(FORWARD_URL, {
+    // We will now `await` this to ensure the request is sent before the function terminates.
+    // The network call from Supabase to Render should be fast enough to not cause a timeout.
+    await fetch(FORWARD_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
