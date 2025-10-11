@@ -1349,7 +1349,7 @@ bot.on('callback_query', async (ctx, next) => {
 });
 
 // Set up the webhook handler
-app.use(await bot.createWebhook({ domain: process.env.WEBHOOK_DOMAIN, path: `/${secretPathComponent}` }));
+app.use(bot.webhookCallback(`/${secretPathComponent}`));
 
 async function startBot() {
   try {
@@ -1361,11 +1361,6 @@ async function startBot() {
     }
 
     logger.info('🚀 Starting bot in webhook mode...');
-
-    // Set the webhook for Telegram
-    const webhookUrl = `https://${WEBHOOK_DOMAIN}/${secretPathComponent}`;
-    await bot.telegram.setWebhook(webhookUrl);
-    logger.info(`✅ Webhook set to ${webhookUrl}`);
 
     // Start the Express server
     const server = app.listen(PORT, '0.0.0.0', () => {
