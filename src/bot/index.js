@@ -41,6 +41,8 @@ import {
   handleLiveSupport,
 } from './workflows/support.js';
 import subscriptionPrices, { planIdMap } from '../utils/subscription-prices.js';
+import { authService } from '../services/authService.js'; // Import the new auth service
+import authRoutes from '../api/authRoutes.js'; // Import the new auth routes
 import { getPrisma } from '../db/client.js';
 
 dotenv.config();
@@ -50,6 +52,9 @@ const secretPathComponent = `telegraf/${bot.secretPathComponent()}`;
 
 const app = express();
 app.use(bodyParser.json());
+
+// Mount the authentication API routes
+app.use('/api/auth', authRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -186,7 +191,7 @@ const ensureRegistered = async (ctx, next) => {
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
 
-  const user = await prisma.users.findUnique({ where: { userId: telegramId } });
+  const user = await authService.findUserById(telegramId);
   if (user) {
     ctx.session.persistentUser = 'yes';
     ctx.session.email = user.email;
@@ -222,7 +227,7 @@ bot.command('start', async (ctx) => {
   ctx.session.platform = 'telegram';
   logger.info('Start command received, resetting session', { telegramId, session: { ...ctx.session } });
 
-  const user = await prisma.users.findUnique({ where: { userId: telegramId } });
+  const user = await authService.findUserById(telegramId);
   if (user) {
     ctx.session.persistentUser = 'yes';
     ctx.session.email = user.email;
@@ -264,41 +269,33 @@ const handleRegistration = async (ctx) => {
         logger.warn('Empty full name input', { userId });
         return ctx.reply('Please enter a valid full name.');
       }
-      ctx.session.fullName = text.trim();
-      ctx.session.firstName = text.trim().split(' ')[0] || text.trim();
-      ctx.session.step = 'collectEmail';
-      logger.info('Advancing to collectEmail', { userId, fullName: ctx.session.fullName });
-      return ctx.reply('Great! Now enter your email:');
+    ctx.session.fullName = text.trim();
+    ctx.session.firstName = text.trim().split(' ')[0] || text.trim();
+    ctx.session.step = 'collectEmail';
+    logger.info('Advancing to collectEmail', { userId, fullName: ctx.session.fullName });
+    return ctx.reply('Great! Now enter your email:');
 
     case 'collectEmail':
       const email = text.trim().toLowerCase();
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(email)) {
         logger.warn('Invalid email input', { userId, email });
-        return ctx.reply('❌ Invalid email. Try again:');
+        return ctx.reply('❌ Invalid email format. Please try again:');
       }
-      const existing = await prisma.users.findFirst({ where: { email } });
-      if (existing) {
+      const emailExists = await authService.checkEmailExists(email);
+      if (emailExists) {
         logger.warn('Email already used', { userId, email });
         return ctx.reply('❌ Email already used. Enter another one:');
       }
       ctx.session.email = email;
-      ctx.session.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-      ctx.session.step = 'verifyCode';
-      const payload = {
-        name: ctx.session.firstName,
-        email: ctx.session.email,
-        verification: ctx.session.verificationCode,
-      };
-      try {
-        await axios.post('https://hook.eu2.make.com/1rzify472wbi8lzbkazby3yyb7ot9rhp', payload);
-        logger.info('Verification email sent', { userId, email });
-      } catch (e) {
-        logger.error('Email webhook failed', { error: e.message, userId });
-        await ctx.reply('❌ Failed to send verification email. Please try again.');
+      const signupResult = await authService.initiateSignup(ctx.session.fullName, ctx.session.email, ctx.session.firstName, userId);
+      if (!signupResult.success) {
+        await ctx.reply(signupResult.error);
         ctx.session.step = null;
         return showMainMenu(ctx);
       }
+      ctx.session.verificationCode = signupResult.verificationCode;
+      ctx.session.step = 'verifyCode';
       return ctx.reply('✅ Enter the code sent to your email:');
 
     case 'verifyCode':
@@ -306,28 +303,22 @@ const handleRegistration = async (ctx) => {
         logger.warn('Incorrect verification code', { userId, input: text.trim() });
         return ctx.reply('❌ Incorrect code. Please try again:');
       }
-      try {
-        await prisma.users.create({
-          data: {
-            userId: ctx.session.userId,
-            fullName: ctx.session.fullName,
-            email: ctx.session.email,
-            platform: ctx.session.platform,
-            admin: false,
-            verified: false,
-          },
-        });
+      const registrationResult = await authService.completeRegistration(
+        ctx.session.userId,
+        ctx.session.fullName,
+        ctx.session.email,
+        ctx.session.platform
+      );
+      if (!registrationResult.success) {
         ctx.session.step = null;
-        ctx.session.persistentUser = 'yes';
-        logger.info('User registered', { userId, email: ctx.session.email });
-        await ctx.reply("✅ You're now registered!");
-        return showMainMenu(ctx);
-      } catch (err) {
-        logger.error('Failed to register user', { error: err.message, stack: err.stack, userId });
-        ctx.session.step = null;
-        await ctx.reply('❌ Error registering user. Please start over.');
+        await ctx.reply(registrationResult.error);
         return showMainMenu(ctx);
       }
+      ctx.session.step = null;
+      ctx.session.persistentUser = 'yes';
+      logger.info('User registered', { userId, email: ctx.session.email });
+      await ctx.reply("✅ You're now registered!");
+      return showMainMenu(ctx);
 
     case 'editFullName':
       const newFullName = text.trim();
@@ -335,20 +326,15 @@ const handleRegistration = async (ctx) => {
         logger.warn('Invalid full name input for edit', { userId, input: newFullName });
         return ctx.reply('❌ Please enter at least your first and last name.');
       }
-      try {
-        await prisma.users.update({
-          where: { userId: ctx.session.userId },
-          data: { fullName: newFullName },
-        });
-        ctx.session.fullName = newFullName;
-        ctx.session.firstName = newFullName.split(' ')[0];
-        ctx.session.step = null;
-        await ctx.reply('✅ Your name has been updated successfully!');
-        return showMainMenu(ctx);
-      } catch (error) {
-        logger.error('Error updating user name', { error: error.message, stack: error.stack, userId });
-        return ctx.reply('❌ An error occurred while updating your name.');
+      const updateNameResult = await authService.updateUserFullName(ctx.session.userId, newFullName);
+      if (!updateNameResult.success) {
+        return ctx.reply(updateNameResult.error);
       }
+      ctx.session.fullName = newFullName;
+      ctx.session.firstName = newFullName.split(' ')[0];
+      ctx.session.step = null;
+      await ctx.reply('✅ Your name has been updated successfully!');
+      return showMainMenu(ctx);
 
     case 'editEmail':
       const newEmail = text.trim().toLowerCase();
@@ -357,27 +343,19 @@ const handleRegistration = async (ctx) => {
         logger.warn('Invalid new email input', { userId, email: newEmail });
         return ctx.reply('❌ Invalid email format. Please try again:');
       }
-      try {
-        const existingUser = await prisma.users.findFirst({ where: { email: newEmail } });
-        if (existingUser) {
-          logger.warn('New email already in use', { userId, email: newEmail });
-          return ctx.reply('❌ This email is already in use. Please enter a different one:');
-        }
-        ctx.session.newEmail = newEmail;
-        ctx.session.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-        ctx.session.step = 'verifyNewEmail';
-        const emailPayload = {
-          name: ctx.session.firstName,
-          email: newEmail,
-          verification: ctx.session.verificationCode,
-        };
-        await axios.post('https://hook.eu2.make.com/1rzify472wbi8lzbkazby3yyb7ot9rhp', emailPayload);
-        logger.info('Verification email sent for email change', { userId, newEmail });
-        return ctx.reply(`✅ A verification code has been sent to ${newEmail}. Please enter the code:`);
-      } catch (error) {
-        logger.error('Error during email edit process', { error: error.message, stack: error.stack, userId });
-        return ctx.reply('❌ An error occurred. Please try again.');
+      const newEmailExists = await authService.checkEmailExists(newEmail);
+      if (newEmailExists) {
+        logger.warn('New email already in use', { userId, email: newEmail });
+        return ctx.reply('❌ This email is already in use. Please enter a different one:');
       }
+      ctx.session.newEmail = newEmail;
+      const emailChangeInitiationResult = await authService.initiateEmailChange(ctx.session.firstName, newEmail, userId);
+      if (!emailChangeInitiationResult.success) {
+        return ctx.reply(emailChangeInitiationResult.error);
+      }
+      ctx.session.verificationCode = emailChangeInitiationResult.verificationCode;
+      ctx.session.step = 'verifyNewEmail';
+      return ctx.reply(`✅ A verification code has been sent to ${newEmail}. Please enter the code:`);
 
     case 'verifyNewEmail':
       if (text.trim() !== ctx.session.verificationCode) {
@@ -386,24 +364,16 @@ const handleRegistration = async (ctx) => {
       }
       const oldEmail = ctx.session.email;
       const verifiedNewEmail = ctx.session.newEmail;
-      try {
-        const subscriptionsToUpdate = await prisma.subscription.findMany({ where: { crew: { has: oldEmail } } });
-        const updatePromises = subscriptionsToUpdate.map(sub => {
-          const newCrew = sub.crew.map(email => (email === oldEmail ? verifiedNewEmail : email));
-          return prisma.subscription.update({ where: { id: sub.id }, data: { crew: newCrew } });
-        });
-        const userUpdatePromise = prisma.users.update({ where: { userId: ctx.session.userId }, data: { email: verifiedNewEmail } });
-        await prisma.$transaction([...updatePromises, userUpdatePromise]);
-        ctx.session.email = verifiedNewEmail;
-        ctx.session.step = null;
-        ctx.session.newEmail = null;
-        ctx.session.verificationCode = null;
-        await ctx.reply('✅ Your email has been updated successfully!');
-        return showMainMenu(ctx);
-      } catch (error) {
-        logger.error('Error updating user email and crew memberships', { error: error.message, stack: error.stack, userId });
-        return ctx.reply('❌ An error occurred while updating your email.');
+      const emailChangeCompletionResult = await authService.completeEmailChange(userId, oldEmail, verifiedNewEmail);
+      if (!emailChangeCompletionResult.success) {
+        return ctx.reply(emailChangeCompletionResult.error);
       }
+      ctx.session.email = verifiedNewEmail;
+      ctx.session.step = null;
+      ctx.session.newEmail = null;
+      ctx.session.verificationCode = null;
+      await ctx.reply('✅ Your email has been updated successfully!');
+      return showMainMenu(ctx);
     default:
       return null;
   }
@@ -465,7 +435,6 @@ const handleSubscriptionListing = async (ctx) => {
 };
 
 bot.on('text', async (ctx, next) => {
-  const prisma = getPrisma();
   const telegramId = String(ctx.from.id);
   ctx.session.userId = telegramId;
   const text = ctx.message.text;
@@ -946,7 +915,109 @@ bot.action('PAYMENT_HISTORY', ensureRegistered, async (ctx) => {
   await ctx.deleteMessage().catch(() => {});
 
   try {
-    const payments = await prisma.payment.findMany({
+    const payments = await prisma.payments.findMany({
+      where: { userId: ctx.session.userId },
+      orderBy: { createdAt: 'desc' },
+      take: 10, // Limit to the last 10 payments for now
+    });
+
+    if (payments.length === 0) {
+      return ctx.reply(
+        'You have no payment history.',
+        Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]])
+      );
+    }
+
+    let historyMessage = '<b>Your Recent Payments:</b>\n\n';
+    payments.forEach((p) => {
+      historyMessage +=
+        `<b>Plan:</b> ${p.subPlan}\n` +
+        `<b>Amount:</b> ₦${p.amount}\n` +
+        `<b>Status:</b> ${p.status.charAt(0).toUpperCase() + p.status.slice(1).replace(/_/g, ' ')}\n` + // Format status
+        `<b>Date:</b> ${p.createdAt.toLocaleDateString()}\n` +
+        `<b>Ref:</b> ${p.reference}\n\n`;
+    });
+
+    await ctx.reply(historyMessage, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('Back', 'WALLET')]]),
+    });
+  } catch (error) {
+    logger.error('Error fetching payment history', { error: error.message, stack: error.stack });
+    await ctx.reply('❌ An error occurred while fetching your payment history.');
+  }
+});
+
+bot.action('VIEW_PERSONAL_INFO', async (ctx) => {
+  await ctx.deleteMessage().catch(() => {});
+
+  try {
+    const user = await authService.findUserById(ctx.session.userId);
+
+    if (!user) {
+      return ctx.reply('❌ Could not find your information. Please try registering again by typing /start.');
+    }
+
+    const userInfo =
+      `<b>Your Personal Information:</b>\n\n` +
+      `<b>Full Name:</b> ${user.fullName}\n` +
+      `<b>Email:</b> ${user.email}\n` +
+      `<b>User ID:</b> ${user.userId}\n` +
+      `<b>Platform:</b> ${user.platform}\n` +
+      `<b>Registered on:</b> ${user.createdAt.toDateString()}`;
+
+    await ctx.reply(userInfo, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback('Edit Name', 'EDIT_NAME'),
+          Markup.button.callback('Edit Email', 'EDIT_EMAIL'),
+        ],
+        [Markup.button.callback('Back', 'PROFILE')]
+      ]),
+    });
+  } catch (error) {
+    logger.error('Error fetching user info in VIEW_PERSONAL_INFO', { error: error.message, stack: error.stack });
+    await ctx.reply('❌ An error occurred while fetching your information.');
+  }
+});
+
+bot.action('EDIT_NAME', async (ctx) => {
+  await ctx.deleteMessage().catch(() => {});
+
+  ctx.session.step = 'editFullName';
+  await ctx.reply('Please enter your new full name:', {
+    reply_markup: Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'VIEW_PERSONAL_INFO')]]).reply_markup
+  });
+});
+
+bot.action('EDIT_EMAIL', async (ctx) => {
+  await ctx.deleteMessage().catch(() => {});
+
+  ctx.session.step = 'editEmail';
+  await ctx.reply('Please enter your new email address:', {
+    reply_markup: Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'VIEW_PERSONAL_INFO')]])
+      .reply_markup,
+  });
+});
+
+bot.action('WALLET', ensureRegistered, async (ctx) => {
+  await ctx.deleteMessage().catch(() => {});
+  await ctx.reply(
+    'Wallet / Payments:',
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Payment History', 'PAYMENT_HISTORY')],
+      [Markup.button.callback('Back to Profile', 'PROFILE')],
+    ])
+  );
+});
+
+bot.action('PAYMENT_HISTORY', ensureRegistered, async (ctx) => {
+  const prisma = getPrisma();
+  await ctx.deleteMessage().catch(() => {});
+
+  try {
+    const payments = await prisma.payments.findMany({
       where: { userId: ctx.session.userId },
       orderBy: { createdAt: 'desc' },
       take: 10, // Limit to the last 10 payments for now
@@ -1028,40 +1099,7 @@ bot.action('PAYMENT_HISTORY', ensureRegistered, async (ctx) => {
 });
 
 bot.action('VIEW_PERSONAL_INFO', async (ctx) => {
-  const prisma = getPrisma();
   await ctx.deleteMessage().catch(() => {});
-
-  try {
-    const user = await prisma.users.findUnique({
-      where: { userId: ctx.session.userId },
-    });
-
-    if (!user) {
-      return ctx.reply('❌ Could not find your information. Please try registering again by typing /start.');
-    }
-
-    const userInfo =
-      `<b>Your Personal Information:</b>\n\n` +
-      `<b>Full Name:</b> ${user.fullName}\n` +
-      `<b>Email:</b> ${user.email}\n` +
-      `<b>User ID:</b> ${user.userId}\n` +
-      `<b>Platform:</b> ${user.platform}\n` +
-      `<b>Registered on:</b> ${user.createdAt.toDateString()}`;
-
-    await ctx.reply(userInfo, {
-      parse_mode: 'HTML',
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback('Edit Name', 'EDIT_NAME'),
-          Markup.button.callback('Edit Email', 'EDIT_EMAIL'),
-        ],
-        [Markup.button.callback('Back', 'PROFILE')]
-      ]),
-    });
-  } catch (error) {
-    logger.error('Error fetching user info in VIEW_PERSONAL_INFO', { error: error.message, stack: error.stack });
-    await ctx.reply('❌ An error occurred while fetching your information.');
-  }
 });
 
 bot.action('EDIT_NAME', async (ctx) => {
